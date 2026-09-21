@@ -1,0 +1,61 @@
+# ==============================================================================
+#                 FLOWERY (GLUE) — СПИСОК ЦЕЛЕВЫХ ДОМЕНОВ
+# ==============================================================================
+# Все домены Discord (API, веб, CDN, шлюзы и все голосовые серверы войсов)
+discord.com
+*.discord.com
+gateway.discord.gg
+discord.gg
+*.discord.gg
+discord.media
+*.discord.media
+rotterdam*.discord.media
+frankfurt*.discord.media
+madrid*.discord.media
+stockholm*.discord.media
+warsaw*.discord.media
+bucharest*.discord.media
+milan*.discord.media
+london*.discord.media
+helsinki*.discord.media
+cdn.discordapp.com
+media.discordapp.net
+router.discordapp.net
+discordapp.com
+*.discordapp.com
+discordapp.net
+*.discordapp.net
+discordapp.io
+discordstatus.com
+status.discord.com
+dis.gd
+discord.co
+discord.design
+discord.dev
+discord.gift
+discord.new
+discord.store
+discord.tools
+discord-attachments-uploads-prd.storage.googleapis.com
+
+# Популярные сервисы для обхода блокировок
+youtube.com
+*.youtube.com
+googlevideo.com
+*.googlevideo.com
+ytimg.com
+*.ytimg.com
+ggpht.com
+*.ggpht.com
+youtu.be
+
+# Социальные сети и трекеры
+x.com
+twitter.com
+t.co
+instagram.com
+facebook.com
+rutracker.org
+ntc.party
+cloudflare.com
+one.one.one.one
