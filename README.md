@@ -37,14 +37,20 @@
 
 ## 🚀 Быстрый старт
 
-1. Скачайте проект или клонируйте репозиторий:
-   ```bash
-   git clone https://github.com/KarlMerkel/Floweryguard.git
-   cd Floweryguard
-   ```
-2. Запустите **`start.bat`** (правой кнопкой мыши -> *Запуск от имени администратора*).
-3. Готово! В консоли появится цветной логотип цветка, активируется локальный прокси и применится профиль обхода.
-4. Для проверки работы запустите **`test.bat`** — скрипт протестирует доступность всех 10 ключевых ресурсов (Discord Web, Gateway, CDN, Voice, YouTube, Rutracker, Twitter).
+### Способ 1: Скачать готовую сборку (рекомендуется)
+1. Скачайте готовый архив в 1 клик:
+   - **[📥 Скачать Flowery_v1.0_Windows.zip (97 КБ)](https://github.com/KarlMerkel/Floweryguard/raw/main/Flowery_v1.0_Windows.zip)** *(или найдите его в разделе [Releases](https://github.com/KarlMerkel/Floweryguard/releases))*.
+2. Распакуйте архив в любое удобное место.
+3. Запустите **`start.bat`** (правой кнопкой мыши -> *Запуск от имени администратора*).
+4. В консоли отобразится цветной цветок, зафиксируется `TTL=65` и запустится прокси с обходом.
+5. Для экспресс-проверки доступности запустите **`test.bat`** (проверяет 10 узлов: Discord, YouTube, Rutracker и др.).
+
+### Способ 2: Клонирование репозитория (для разработчиков)
+```bash
+git clone https://github.com/KarlMerkel/Floweryguard.git
+cd Floweryguard
+start.bat
+```
 
 ---
 
