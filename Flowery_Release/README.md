@@ -38,8 +38,8 @@
 ## 🚀 Быстрый старт
 
 ### Способ 1: Скачать готовую сборку (рекомендуется)
-1. Скачайте готовый архив в 1 клик:
-   - **[📥 Скачать Flowery_v1.0_Windows.zip (97 КБ)](https://github.com/KarlMerkel/Floweryguard/raw/main/Flowery_v1.0_Windows.zip)** *(или найдите его в разделе [Releases](https://github.com/KarlMerkel/Floweryguard/releases))*.
+1. Скачайте официальный архив релиза в 1 клик:
+   - **[📥 Скачать Flowery_v1.0_Windows.zip (97 КБ)](https://github.com/KarlMerkel/Floweryguard/releases/download/v1.0.0/Flowery_v1.0_Windows.zip)** *(или перейдите в раздел [Releases](https://github.com/KarlMerkel/Floweryguard/releases))*.
 2. Распакуйте архив в любое удобное место.
 3. Запустите **`start.bat`** (правой кнопкой мыши -> *Запуск от имени администратора*).
 4. В консоли отобразится цветной цветок, зафиксируется `TTL=65` и запустится прокси с обходом.
