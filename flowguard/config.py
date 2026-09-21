@@ -4,7 +4,7 @@
 
 import os
 import configparser
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Optional
 
 DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     "proxy": {
@@ -45,6 +45,10 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "spoof_sni": False,
         "whitelisted_sni": "gosuslugi.ru",
         "fake_sni_record": False,
+    },
+    "targets": {
+        "whitelist_file": "whitelist.txt",
+        "only_target_domains": False,
     },
 }
 
@@ -210,3 +214,57 @@ class Config:
     @property
     def whitelist_fake_sni_record(self) -> bool:
         return self.get_bool("whitelist_bypass", "fake_sni_record")
+
+    @property
+    def whitelist_file(self) -> str:
+        return self.get_str("targets", "whitelist_file")
+
+    @property
+    def only_target_domains(self) -> bool:
+        return self.get_bool("targets", "only_target_domains")
+
+
+def load_whitelist_domains(filepath: str = "whitelist.txt") -> Tuple[set, Optional[str]]:
+    """Загружает список целевых доменов для обхода из текстового файла.
+    
+    Поддерживает точные имена, маски wildcard (*.domain.com) и комментарии (#).
+    Возвращает (набор_доменов, фактический_путь_к_файлу).
+    """
+    domains = set()
+    search_paths = [
+        filepath,
+        os.path.join(os.getcwd(), filepath),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), filepath),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), filepath),
+    ]
+    actual_path = None
+    for p in search_paths:
+        if os.path.exists(p) and os.path.isfile(p):
+            actual_path = p
+            break
+
+    if actual_path:
+        try:
+            with open(actual_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        domains.add(line.lower())
+        except Exception as e:
+            print(f"[!] Ошибка чтения списка доменов {actual_path}: {e}")
+    return domains, actual_path
+
+
+def is_host_in_whitelist(host: str, whitelist: set) -> bool:
+    """Проверяет, входит ли хост или SNI в список целевых доменов обхода."""
+    if not host or not whitelist:
+        return False
+    h = host.lower().strip(".")
+    if h in whitelist:
+        return True
+    parts = h.split(".")
+    for i in range(len(parts)):
+        sub = ".".join(parts[i:])
+        if sub in whitelist or f"*.{sub}" in whitelist:
+            return True
+    return False

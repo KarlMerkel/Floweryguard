@@ -12,8 +12,9 @@ import select
 import threading
 import time
 import sys
+import os
 from typing import Optional, Tuple, List
-from Floweryguard.config import Config
+from Floweryguard.config import Config, load_whitelist_domains, is_host_in_whitelist
 from Floweryguard.tls_parser import is_tls_client_hello, parse_sni, create_tls_record_fragments
 from Floweryguard.sni_spoofer import SNISpoofer
 
@@ -170,6 +171,27 @@ class DPIBypassProxy:
             whitelisted_sni=config.whitelist_whitelisted_sni,
             delay=config.fragment_delay
         )
+        self.whitelist_domains, self.whitelist_path = load_whitelist_domains(config.whitelist_file)
+        self._whitelist_mtime = os.path.getmtime(self.whitelist_path) if (self.whitelist_path and os.path.exists(self.whitelist_path)) else 0
+        self._whitelist_last_check = time.time()
+        self._logged_whitelisted = set()
+
+    def _check_reload_whitelist(self) -> None:
+        """Проверяет изменение whitelist.txt и перезагружает на лету (hot-reload)."""
+        now = time.time()
+        if now - self._whitelist_last_check < 2.0:
+            return
+        self._whitelist_last_check = now
+        if self.whitelist_path and os.path.exists(self.whitelist_path):
+            try:
+                mtime = os.path.getmtime(self.whitelist_path)
+                if mtime != self._whitelist_mtime:
+                    new_domains, _ = load_whitelist_domains(self.whitelist_path)
+                    self.whitelist_domains = new_domains
+                    self._whitelist_mtime = mtime
+                    print(f"\033[96m[*] Whitelist обновлён на лету ({len(self.whitelist_domains)} доменов из {os.path.basename(self.whitelist_path)})\033[0m")
+            except Exception:
+                pass
 
     def start(self) -> None:
         """Запускает слушающий сокет прокси сервера."""
@@ -184,6 +206,7 @@ class DPIBypassProxy:
         oob_status = "\033[92mВКЛ\033[0m" if self.config.oob_data else "\033[90mВЫКЛ\033[0m"
         host_obf_status = "\033[92mВКЛ\033[0m" if self.config.http_host_obfuscation else "\033[90mВЫКЛ\033[0m"
         whitelist_status = f"\033[92mВКЛ\033[0m ({self.config.whitelist_whitelisted_sni})" if self.config.whitelist_fake_sni_record else "\033[90mВЫКЛ\033[0m"
+        wl_mode = "Строго whitelist" if self.config.only_target_domains else "Глобальный + Whitelist"
 
         print(f"\033[92m[*] Прокси-сервер Flowery запущен на {self.host}:{self.port}\033[0m")
         print("\033[94m[*] Активные техники обхода DPI и белых списков:\033[0m")
@@ -192,6 +215,7 @@ class DPIBypassProxy:
         print(f"    - OOB Urgent Data: {oob_status}")
         print(f"    - HTTP Host Obfuscation: {host_obf_status}")
         print(f"    - Whitelist Fake SNI Desync: {whitelist_status}")
+        print(f"    - Whitelist доменов: \033[92m{len(self.whitelist_domains)}\033[0m хостов ({self.config.whitelist_file}, режим: {wl_mode})")
 
         threading.Thread(target=self._accept_loop, daemon=True, name="ProxyAcceptLoop").start()
 
@@ -489,7 +513,21 @@ class DPIBypassProxy:
             target_sock.sendall(data)
             return
 
+        self._check_reload_whitelist()
+        is_whitelisted = is_host_in_whitelist(sni_name, self.whitelist_domains) or is_host_in_whitelist(target_host, self.whitelist_domains)
+
+        if is_whitelisted and sni_name not in self._logged_whitelisted:
+            if len(self._logged_whitelisted) > 256:
+                self._logged_whitelisted.clear()
+            self._logged_whitelisted.add(sni_name)
+            print(f"\033[92m[+] DPI Bypass активирован: {sni_name} (найден в {self.config.whitelist_file})\033[0m")
+
         is_discord = is_discord_host(sni_name) or is_discord_host(target_host)
+
+        # Если включен режим strictly whitelist, и хост не в вайтлисте и не Discord:
+        if self.config.only_target_domains and not (is_whitelisted or is_discord):
+            target_sock.sendall(data)
+            return
 
         # -------------------------------------------------------------
         # ОСОБЫЙ РЕЖИМ ДЛЯ DISCORD (API, Gateway, CDN и Voice media)
@@ -515,7 +553,7 @@ class DPIBypassProxy:
             return
 
         # Техника 2: TLS Record Fragmentation для остальных сайтов (YouTube, Rutracker и др.)
-        if self.config.tls_record_frag:
+        if self.config.tls_record_frag or is_whitelisted:
             split_offset = (sni_info[1] + 1) if sni_info else None
             fragments = create_tls_record_fragments(data, split_offset)
 
