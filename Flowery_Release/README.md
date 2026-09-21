@@ -1,11 +1,11 @@
-# 🌸 Flowery (Glue) — DPI Bypass & Tethering Mask для Windows
+# 🌸 Floweryguard — DPI Bypass & Tethering Mask для Windows
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d7.svg)](https://microsoft.com)
 [![Dependencies: None](https://img.shields.io/badge/dependencies-zero%20(stdlib)-brightgreen.svg)](https://docs.python.org/3/library/)
 
-**Flowery (Glue)** — лёгкий автономный инструмент для обхода DPI-блокировок (ТСПУ / РКН) и операторских ограничений при раздаче интернета со смартфона на ПК (тетеринг).
+**Floweryguard** — лёгкий автономный инструмент для обхода DPI-блокировок (ТСПУ / РКН) и операторских ограничений при раздаче интернета со смартфона на ПК (тетеринг).
 
 Инструмент работает **полностью автономно**:
 - 🚫 Не требует внешних VPS или платных серверов.
