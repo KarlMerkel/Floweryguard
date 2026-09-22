@@ -12,7 +12,7 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "port": 8118,
         "auto_system_proxy": True,
         "proxy_discord": True,
-        "proxy_youtube": False,
+        "proxy_youtube": True,
         "timeout": 15,
         "buffer_size": 16384,
     },

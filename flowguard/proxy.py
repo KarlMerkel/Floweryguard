@@ -503,12 +503,11 @@ class DPIBypassProxy:
         lower_host = target_host.lower()
         lower_sni = sni_name.lower()
 
-        # Хосты прямых загрузок, обновлений и YouTube/Google (обрабатываемые zapret на WinDivert)
+        # Хосты прямых загрузок, обновлений (one.one.one.one, dl., updates.)
         if (
             lower_host.startswith("dl.") or lower_sni.startswith("dl.")
             or "updates." in lower_host or "updates." in lower_sni
             or "one.one.one.one" in lower_host or "one.one.one.one" in lower_sni
-            or is_google_or_youtube_host(lower_host) or is_google_or_youtube_host(lower_sni)
         ):
             target_sock.sendall(data)
             return
@@ -523,10 +522,24 @@ class DPIBypassProxy:
             print(f"\033[92m[+] DPI Bypass активирован: {sni_name} (найден в {self.config.whitelist_file})\033[0m")
 
         is_discord = is_discord_host(sni_name) or is_discord_host(target_host)
+        is_youtube = is_google_or_youtube_host(lower_host) or is_google_or_youtube_host(lower_sni)
 
-        # Если включен режим strictly whitelist, и хост не в вайтлисте и не Discord:
-        if self.config.only_target_domains and not (is_whitelisted or is_discord):
+        # Если включен режим strictly whitelist, и хост не в вайтлисте, не Discord и не YouTube:
+        if self.config.only_target_domains and not (is_whitelisted or is_discord or is_youtube):
             target_sock.sendall(data)
+            return
+
+        # -------------------------------------------------------------
+        # ОСОБЫЙ РЕЖИМ ДЛЯ YOUTUBE И GOOGLE (Video, CDN, googlevideo.com)
+        # Google BoringSSL не поддерживает разбиение на 2 TLS-рекорда,
+        # но надёжно обходит ТСПУ через TCP Split на позиции 40 (после заголовка рекорда перед SNI).
+        # -------------------------------------------------------------
+        if is_youtube:
+            split_pos = min(40, max(1, len(data) - 1))
+            target_sock.sendall(data[:split_pos])
+            if self.config.fragment_delay > 0:
+                time.sleep(self.config.fragment_delay)
+            target_sock.sendall(data[split_pos:])
             return
 
         # -------------------------------------------------------------
