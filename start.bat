@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Flowery (Glue) — DPI Bypass & Tethering Mask for Windows
+title Flowery - DPI Bypass and Tethering Mask for Windows
 
 REM Enable ANSI / Virtual Terminal Processing in Windows Console
 reg add "HKCU\Console" /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
@@ -18,7 +18,7 @@ net session >nul 2>&1
 if %errorlevel% neq 0 (
     if "%~1" neq "elevated" (
         echo [*] Requesting Administrator privileges...
-        powershell -NoProfile -Command "Start-Process cmd.exe -WorkingDirectory '%~dp0.' -ArgumentList '/k', 'start.bat elevated' -Verb RunAs" 2>nul
+        powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList 'elevated' -Verb RunAs" 2>nul
         if %errorlevel% equ 0 exit /b
         echo [!] Could not elevate automatically. Running in standard mode...
     )
@@ -26,7 +26,7 @@ if %errorlevel% neq 0 (
 
 REM Check for standalone Flowery.exe first
 if exist "%~dp0Flowery.exe" (
-    echo [*] Starting Flowery (Glue) Standalone...
+    echo [*] Starting Flowery Standalone...
     echo.
     "%~dp0Flowery.exe" --all
     goto :safe_exit
@@ -45,7 +45,7 @@ if not defined PY_CMD (
 )
 
 if not defined PY_CMD (
-    echo [X] ERROR: Python was not found!
+    echo [X] ERROR: Python or Flowery.exe was not found!
     echo Please install Python 3.8+ from https://python.org and check 'Add Python to PATH'.
     echo Or place Flowery.exe into this directory.
     echo.
@@ -53,7 +53,7 @@ if not defined PY_CMD (
     exit /b 1
 )
 
-echo [*] Starting Flowery (Glue)...
+echo [*] Starting Flowery...
 echo.
 "%PY_CMD%" Floweryguard\main.py --all
 

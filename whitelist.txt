@@ -59,3 +59,4 @@ rutracker.org
 ntc.party
 cloudflare.com
 one.one.one.one
+virustotal.com

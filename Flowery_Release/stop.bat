@@ -1,5 +1,6 @@
 @echo off
-title Flowery (Glue) - Emergency Reset & Restore
+chcp 65001 >nul
+title Flowery - Emergency Reset and Restore
 cd /d "%~dp0"
 
 echo [*] Сброс настроек и восстановление системы Windows...
@@ -22,8 +23,8 @@ if not defined PY_CMD (
     where py >nul 2>&1 && set "PY_CMD=py"
 )
 if not defined PY_CMD (
-    if exist "%LocalAppData%\Programs\Python\Python311\python.exe" (
-        set "PY_CMD=%LocalAppData%\Programs\Python\Python311\python.exe"
+    for /d %%D in ("%LocalAppData%\Programs\Python\Python3*") do (
+        if exist "%%D\python.exe" set "PY_CMD=%%D\python.exe"
     )
 )
 
