@@ -8,6 +8,7 @@ import sys
 import subprocess
 from typing import Optional
 from Floweryguard.ttl_fix import is_admin
+from Floweryguard.config import get_app_base_dir
 
 
 def is_system_winws_running() -> bool:
@@ -27,7 +28,7 @@ class VoiceHelper:
     """Управление точечным запуском WinDivert/winws для голосовых каналов Discord."""
 
     def __init__(self, bin_dir: Optional[str] = None):
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base_dir = get_app_base_dir()
         self.bin_dir = bin_dir or os.path.join(base_dir, "zapret_bin")
         self.winws_path = os.path.join(self.bin_dir, "winws.exe")
         self.fake_discord = os.path.join(self.bin_dir, "ACTIVE_DISCORD_UDP.bin")

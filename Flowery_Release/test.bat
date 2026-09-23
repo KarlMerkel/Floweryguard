@@ -6,6 +6,16 @@ REM Включение поддержки цветов ANSI в Windows
 reg add "HKCU\Console" /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
 mode con: cols=125 lines=40 >nul 2>&1
 
+REM Проверка автономного бинарника Flowery.exe
+if exist "%~dp0Flowery.exe" (
+    echo [*] Запуск экспресс-теста доступности ресурсов через Flowery.exe...
+    echo.
+    "%~dp0Flowery.exe" --test
+    echo.
+    pause
+    exit /b 0
+)
+
 set "PY_CMD="
 where python >nul 2>&1 && set "PY_CMD=python"
 if not defined PY_CMD (

@@ -396,6 +396,11 @@ class FloweryApp:
 
 
 def main():
+    if getattr(sys, "frozen", False):
+        try:
+            os.chdir(os.path.dirname(sys.executable))
+        except Exception:
+            pass
     parser = argparse.ArgumentParser(description="Flowery (Glue) — DPI bypass tool для мобильного тетеринга")
     parser.add_argument("--all", action="store_true", default=False, help="Запустить полный комплекс (по умолчанию)")
     parser.add_argument("--status", action="store_true", help="Показать текущий статус сетевых параметров")

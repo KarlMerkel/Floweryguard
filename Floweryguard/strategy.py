@@ -20,6 +20,7 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+from Floweryguard.config import get_app_base_dir
 from Floweryguard.tls_parser import (
     is_tls_client_hello,
     parse_sni,
@@ -203,7 +204,7 @@ class ThompsonStrategySelector:
         self._last_save = time.time()
 
         if cache_file is None:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            base_dir = get_app_base_dir()
             self.cache_file = os.path.join(base_dir, "strategy_scores.json")
         else:
             self.cache_file = cache_file

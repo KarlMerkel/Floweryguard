@@ -10,6 +10,12 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v Pr
 REM Удаление правила брандмауэра для QUIC
 netsh advfirewall firewall delete rule name="Flowery_Block_QUIC" >nul 2>&1
 
+REM Использование Flowery.exe если доступен
+if exist "%~dp0Flowery.exe" (
+    "%~dp0Flowery.exe" --clean >nul 2>&1
+    goto :done
+)
+
 set "PY_CMD="
 where python >nul 2>&1 && set "PY_CMD=python"
 if not defined PY_CMD (
@@ -25,6 +31,7 @@ if defined PY_CMD (
     "%PY_CMD%" -c "import sys; sys.path.insert(0, '.'); from Floweryguard.system_proxy import SystemProxyManager, refresh_system_proxy_settings; SystemProxyManager().disable(force=True); refresh_system_proxy_settings()" >nul 2>&1
 )
 
+:done
 echo [+] Системный прокси Windows выключен.
 echo [+] Настройки сети и брандмауэра успешно сброшены в исходное состояние.
 echo.

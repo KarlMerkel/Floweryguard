@@ -24,6 +24,14 @@ if %errorlevel% neq 0 (
     )
 )
 
+REM Check for standalone Flowery.exe first
+if exist "%~dp0Flowery.exe" (
+    echo [*] Starting Flowery (Glue) Standalone...
+    echo.
+    "%~dp0Flowery.exe" --all
+    goto :safe_exit
+)
+
 REM Find Python executable
 set "PY_CMD="
 where python >nul 2>&1 && set "PY_CMD=python"
@@ -39,6 +47,7 @@ if not defined PY_CMD (
 if not defined PY_CMD (
     echo [X] ERROR: Python was not found!
     echo Please install Python 3.8+ from https://python.org and check 'Add Python to PATH'.
+    echo Or place Flowery.exe into this directory.
     echo.
     pause
     exit /b 1
@@ -48,6 +57,7 @@ echo [*] Starting Flowery (Glue)...
 echo.
 "%PY_CMD%" Floweryguard\main.py --all
 
+:safe_exit
 REM Safe exit: guarantee system proxy is turned off upon exit
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1
 

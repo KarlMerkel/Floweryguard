@@ -3,9 +3,17 @@
 """
 
 import os
+import sys
 import fnmatch
 import configparser
 from typing import Dict, Any, Tuple, Optional
+
+def get_app_base_dir() -> str:
+    """Get application base directory (safe for frozen .exe and .py)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     "proxy": {
@@ -70,7 +78,19 @@ class Config:
 
     def load(self) -> None:
         """Загружает настройки из файла config.ini, при отсутствии создаёт дефолтные."""
-        if os.path.exists(self.config_path):
+        search_paths = [
+            self.config_path,
+            os.path.join(os.getcwd(), self.config_path),
+            os.path.join(get_app_base_dir(), self.config_path),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), self.config_path),
+        ]
+        actual_path = None
+        for p in search_paths:
+            if p and os.path.exists(p) and os.path.isfile(p):
+                actual_path = p
+                break
+        if actual_path:
+            self.config_path = actual_path
             try:
                 self._parser.read(self.config_path, encoding="utf-8")
             except Exception as e:
@@ -258,6 +278,7 @@ def load_whitelist_domains(filepath: str = "whitelist.txt") -> Tuple[set, Option
     search_paths = [
         filepath,
         os.path.join(os.getcwd(), filepath),
+        os.path.join(get_app_base_dir(), filepath),
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), filepath),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), filepath),
     ]

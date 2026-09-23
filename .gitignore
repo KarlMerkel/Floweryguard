@@ -47,3 +47,7 @@ scratch/
 *.log
 *.tmp
 strategy_scores.json
+ 
+Flowery.spec
+Flowery.exe
+Flowery_Release/Flowery.exe
