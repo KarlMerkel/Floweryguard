@@ -325,13 +325,14 @@ class ThompsonStrategySelector:
             scores["dummy_record_prepend"] = [0.1, 50.0]
             scores["boringssl_split"] = [0.1, 50.0]
         else:
-            # Универсальный приоритет для остальных ресурсов (X, Rutracker и др.)
-            scores["disoob_sni"] = [80.0, 1.0]
-            scores["combo_tlsrec_tcpsplit"] = [5.0, 5.0]
-            scores["dummy_record_prepend"] = [4.0, 5.0]
-            scores["tcp_split_sni_mid"] = [3.0, 5.0]
+            # Универсальный приоритет для остальных ресурсов (Cloudflare, NTC, X, Rutracker и др.)
+            # combo_tlsrec_tcpsplit наиболее совместима с Cloudflare и современными CDN
+            scores["combo_tlsrec_tcpsplit"] = [25.0, 1.0]
+            scores["tcp_split_sni_mid"] = [10.0, 1.0]
+            scores["tls_record_frag"] = [8.0, 2.0]
+            scores["disoob_sni"] = [5.0, 2.0]
             scores["multi_split"] = [2.0, 5.0]
-            scores["tls_record_frag"] = [2.0, 5.0]
+            scores["dummy_record_prepend"] = [1.0, 5.0]
 
         return scores
 
@@ -404,7 +405,8 @@ class ThompsonStrategySelector:
                 self._trim_capacity_locked()
                 self._scores[domain_key] = self._init_domain_priors(domain_key, False, False)
             if strategy in self._scores[domain_key]:
-                self._scores[domain_key][strategy][1] += 2.0  # Пенализируем быстрее (beta += 2)
+                self._scores[domain_key][strategy][1] += 20.0  # Моментально пенализируем (beta += 20)
+                self._scores[domain_key][strategy][0] = max(0.1, self._scores[domain_key][strategy][0] * 0.4)
                 # Decay / capping при накоплении статистики для сохранения адаптивности
                 total = self._scores[domain_key][strategy][0] + self._scores[domain_key][strategy][1]
                 if total > 200.0:
