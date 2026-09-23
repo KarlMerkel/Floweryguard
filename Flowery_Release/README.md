@@ -16,10 +16,12 @@
 
 ## ⚡ Ключевые возможности
 
-### 1. Независимый обход Discord (даже без zapret)
+### 1. Независимый обход Discord и YouTube (автономно или с zapret)
+- **Thompson Sampling Strategy Engine**: самообучающийся Multi-Armed Bandit алгоритм (в стиле Nova), непрерывно подбирающий оптимальную стратегию (TCP Split, TLS Record Fragmentation, OOB Data, Direct) индивидуально под каждого провайдера и домен.
 - **TLS Record Fragmentation**: разделяет рукопожатие ClientHello на две валидные TLS-записи прямо посередине имени домена (SNI). DPI не видит заблокированный хост и пропускает трафик.
+- **Гармоничный тандем с Flowseal zapret**: при обнаружении активного `winws.exe` автоматически использует бесконфликтную прямую маршрутизацию (`direct`) для Discord и YouTube, исключая двойную десинхронизацию.
+- **Голосовые каналы (Voice & WebRTC)**: модуль `voice_helper` точечно перехватывает UDP-порты голосовых каналов (50000-50100) без конфликтов с TCP.
 - **RFC 8305 (Happy Eyeballs)**: каскадно опрашивает все IP-адреса целевых серверов параллельно за 250 мс, мгновенно подключаясь к живому IP в обход заблокированных подсетей Cloudflare.
-- **Голосовые каналы (Voice & WebRTC)**: поддерживает голосовые шлюзы `*.discord.media` и автоматический fallback на TCP/443 при блокировке UDP.
 
 ### 2. Скрытие раздачи интернета (Tethering Mask)
 - **Фиксация TTL = 65**: автоматически прописывает `DefaultTTL = 65` в реестре Windows (`Tcpip\Parameters`). При прохождении смартфона значение уменьшается на 1, и оператор видит стандартный смартфонный TTL=64. Платная раздача не списывается.
@@ -30,7 +32,7 @@
 - При выходе (`Ctrl+C` или закрытие) **гарантированно возвращает все настройки системы в исходное состояние**.
 
 ### 4. Совместимость с Flowseal zapret
-- Flowery работает на уровне локального HTTP/HTTPS прокси (`127.0.0.1:8118`) и **не использует WinDivert**.
+- Flowery работает на уровне локального HTTP/HTTPS прокси (`127.0.0.1:8118`) и **не использует WinDivert в TCP-стеке**.
 - Полностью исключены конфликты драйверов — может работать как на 100% самостоятельно, так и в тандеме с Flowseal zapret (`winws.exe`).
 
 ---
@@ -39,7 +41,7 @@
 
 ### Способ 1: Скачать готовую сборку (рекомендуется)
 1. Скачайте официальный архив релиза в 1 клик:
-   - **[📥 Скачать Flowery_v1.0_Windows.zip (97 КБ)](https://github.com/KarlMerkel/Floweryguard/releases/download/v1.0.0/Flowery_v1.0_Windows.zip)** *(или перейдите в раздел [Releases](https://github.com/KarlMerkel/Floweryguard/releases))*.
+   - **[📥 Скачать Flowery_v1.1.0_Windows.zip](https://github.com/KarlMerkel/Floweryguard/releases/download/v1.1.0/Flowery_v1.1.0_Windows.zip)** *(или перейдите в раздел [Releases](https://github.com/KarlMerkel/Floweryguard/releases))*.
 2. Распакуйте архив в любое удобное место.
 3. Запустите **`start.bat`** (правой кнопкой мыши -> *Запуск от имени администратора*).
 4. В консоли отобразится цветной цветок, зафиксируется `TTL=65` и запустится прокси с обходом.
@@ -62,6 +64,8 @@ Flowery/
 │   ├── __init__.py
 │   ├── main.py                 # Главная точка входа и оркестратор
 │   ├── proxy.py                # HTTP CONNECT прокси, TCP Split, TLS Record Frag, Happy Eyeballs
+│   ├── strategy.py             # Thompson Sampling Strategy Engine (Multi-Armed Bandit)
+│   ├── voice_helper.py         # Discord Voice WebRTC UDP helper
 │   ├── detector.py             # Авто-детектор ограничений сети (тетеринг vs DPI)
 │   ├── tls_parser.py           # Парсер TLS ClientHello и генератор сплита
 │   ├── system_proxy.py         # Менеджер системного прокси Windows (WinINet)
@@ -69,8 +73,10 @@ Flowery/
 │   ├── quic_block.py           # Управление правилом UDP/443 в Windows Firewall
 │   ├── dns_config.py           # Резервные защищённые DNS
 │   ├── sni_spoofer.py          # Модуль десинхронизации SNI под белые списки
+│   ├── test_strategies.py      # Модульные тесты стратегий и сокетов
 │   ├── tester.py               # Встроенный модуль экспресс-тестирования узлов
 │   └── config.py               # Менеджер настроек (config.ini)
+├── zapret_bin/                 # Бинарные утилиты для точечной десинхронизации UDP войса
 ├── config.ini                  # Файл конфигурации
 ├── whitelist.txt               # Список целевых доменов
 ├── start.bat                   # Лаунчер полного комплекса с авто-повышением прав

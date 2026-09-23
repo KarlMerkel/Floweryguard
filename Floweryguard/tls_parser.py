@@ -77,15 +77,36 @@ def parse_sni(data: bytes) -> Optional[Tuple[str, int, int]]:
                     if host_start + name_len <= len(data):
                         host_bytes = data[host_start:host_start + name_len]
                         try:
-                            hostname = host_bytes.decode("ascii")
+                            hostname = host_bytes.decode("idna")
                             return (hostname, host_start, name_len)
-                        except UnicodeDecodeError:
-                            return None
+                        except Exception:
+                            try:
+                                hostname = host_bytes.decode("utf-8", errors="replace")
+                                return (hostname, host_start, name_len)
+                            except Exception:
+                                return None
             pos += ext_data_len
 
         return None
     except Exception:
         return None
+
+
+def get_sni_offsets(data: bytes) -> Optional[Tuple[int, int, int]]:
+    """Возвращает точные смещения SNI в пакете ClientHello:
+    (sni_start, sni_mid, sni_end).
+    
+    - sni_start (+s): позиция первого байта имени хоста.
+    - sni_mid (+sm): позиция середины имени хоста.
+    - sni_end (+se): позиция последнего байта имени хоста.
+    """
+    info = parse_sni(data)
+    if not info:
+        return None
+    _, start, length = info
+    mid = start + max(1, length // 2)
+    end = start + length
+    return (start, mid, end)
 
 
 def create_tls_record_fragments(data: bytes, split_offset: Optional[int] = None) -> List[bytes]:
@@ -119,3 +140,65 @@ def create_tls_record_fragments(data: bytes, split_offset: Optional[int] = None)
     rec2 = b"\x16" + rec_version + struct.pack("!H", len(payload2)) + payload2
 
     return [rec1, rec2]
+
+
+def create_multi_tls_record_fragments(data: bytes, split_offsets: Optional[List[int]] = None) -> List[bytes]:
+    """Разбивает один ClientHello на N валидных TLS Record (каскадная фрагментация).
+    
+    Каждый срез получает стандартный TLS Record Header (RFC 5246/8446).
+    """
+    if not is_tls_client_hello(data) or len(data) < 15:
+        return [data]
+
+    rec_version = data[1:3]
+    payload = data[5:]
+    payload_len = len(payload)
+
+    if not split_offsets:
+        # Автоматические точки разбиения: SNI-start, SNI-mid, если найдены
+        offsets = get_sni_offsets(data)
+        if offsets:
+            start, mid, _ = offsets
+            points = [start - 5, mid - 5]
+        else:
+            points = [payload_len // 3, (2 * payload_len) // 3]
+    else:
+        # Преобразуем смещения пакета в смещения payload (минус 5 байт заголовка)
+        points = [max(1, min(p - 5 if p > 5 else p, payload_len - 1)) for p in split_offsets]
+
+    # Сортируем и удаляем дубликаты
+    sorted_points = sorted(list(set(points)))
+    valid_points = [p for p in sorted_points if 0 < p < payload_len]
+
+    if not valid_points:
+        return [data]
+
+    records = []
+    prev = 0
+    for p in valid_points:
+        chunk = payload[prev:p]
+        if chunk:
+            rec = b"\x16" + rec_version + struct.pack("!H", len(chunk)) + chunk
+            records.append(rec)
+        prev = p
+
+    last_chunk = payload[prev:]
+    if last_chunk:
+        rec = b"\x16" + rec_version + struct.pack("!H", len(last_chunk)) + last_chunk
+        records.append(rec)
+
+    return records if len(records) > 1 else [data]
+
+
+def create_dummy_tls_record(dummy_type: str = "alert") -> bytes:
+    """Генерирует минимальный безобидный TLS Record для сбивания анализаторов DPI.
+    
+    - 'alert': TLS Alert (Level=Warning, Description=CloseNotify, RFC 5246 7.2.1)
+    - 'appdata': Пустой TLS Application Data Record (Content Type 0x17)
+    """
+    if dummy_type == "appdata":
+        # Content Type 0x17 (Application Data), Version TLS 1.2, Length 0
+        return b"\x17\x03\x03\x00\x00"
+    else:
+        # Content Type 0x15 (Alert), Version TLS 1.2, Length 2, Warning(1), CloseNotify(0)
+        return b"\x15\x03\x03\x00\x02\x01\x00"

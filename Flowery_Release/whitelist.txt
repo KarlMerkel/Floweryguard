@@ -59,4 +59,3 @@ rutracker.org
 ntc.party
 cloudflare.com
 one.one.one.one
-ntc.party

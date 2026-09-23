@@ -3,6 +3,7 @@
 """
 
 import os
+import fnmatch
 import configparser
 from typing import Dict, Any, Tuple, Optional
 
@@ -12,9 +13,10 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "port": 8118,
         "auto_system_proxy": True,
         "proxy_discord": True,
+        "discord_voice_udp": True,
         "proxy_youtube": True,
         "timeout": 15,
-        "buffer_size": 16384,
+        "buffer_size": 65536,
     },
     "bypass": {
         "tcp_split": True,
@@ -41,7 +43,7 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "enable_custom_dns": False,
     },
     "whitelist_bypass": {
-        "auto_detect": True,
+        "auto_detect": False,
         "spoof_sni": False,
         "whitelisted_sni": "gosuslugi.ru",
         "fake_sni_record": False,
@@ -49,6 +51,10 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     "targets": {
         "whitelist_file": "whitelist.txt",
         "only_target_domains": False,
+    },
+    "strategy": {
+        "auto_strategy": True,
+        "default_strategy": "disoob_sni",
     },
 }
 
@@ -90,7 +96,10 @@ class Config:
 
     def get_int(self, section: str, key: str) -> int:
         if key in self._overrides:
-            return int(self._overrides[key])
+            try:
+                return int(self._overrides[key])
+            except (ValueError, TypeError):
+                pass
         fallback = int(DEFAULT_CONFIG.get(section, {}).get(key, 0))
         try:
             return self._parser.getint(section, key, fallback=fallback)
@@ -99,7 +108,10 @@ class Config:
 
     def get_float(self, section: str, key: str) -> float:
         if key in self._overrides:
-            return float(self._overrides[key])
+            try:
+                return float(self._overrides[key])
+            except (ValueError, TypeError):
+                pass
         fallback = float(DEFAULT_CONFIG.get(section, {}).get(key, 0.0))
         try:
             return self._parser.getfloat(section, key, fallback=fallback)
@@ -130,6 +142,10 @@ class Config:
     @property
     def proxy_discord(self) -> bool:
         return self.get_bool("proxy", "proxy_discord")
+
+    @property
+    def discord_voice_udp(self) -> bool:
+        return self.get_bool("proxy", "discord_voice_udp")
 
     @property
     def proxy_youtube(self) -> bool:
@@ -223,6 +239,14 @@ class Config:
     def only_target_domains(self) -> bool:
         return self.get_bool("targets", "only_target_domains")
 
+    @property
+    def auto_strategy(self) -> bool:
+        return self.get_bool("strategy", "auto_strategy")
+
+    @property
+    def default_strategy(self) -> str:
+        return self.get_str("strategy", "default_strategy")
+
 
 def load_whitelist_domains(filepath: str = "whitelist.txt") -> Tuple[set, Optional[str]]:
     """Загружает список целевых доменов для обхода из текстового файла.
@@ -263,8 +287,12 @@ def is_host_in_whitelist(host: str, whitelist: set) -> bool:
     if h in whitelist:
         return True
     parts = h.split(".")
-    for i in range(len(parts)):
+    for i in range(1, len(parts)):
         sub = ".".join(parts[i:])
         if sub in whitelist or f"*.{sub}" in whitelist:
+            return True
+    # Поддержка произвольных wildcard-шаблонов (например rotterdam*.discord.media или rr*.googlevideo.com)
+    for pattern in whitelist:
+        if ("*" in pattern or "?" in pattern) and fnmatch.fnmatch(h, pattern):
             return True
     return False

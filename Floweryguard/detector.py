@@ -77,6 +77,21 @@ def check_dns_udp(dns_ip: str, port: int = 53, timeout: float = 2.0) -> bool:
                 pass
 
 
+class RedirectionException(Exception):
+    def __init__(self, location: str):
+        self.location = location
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if fp:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        raise RedirectionException(newurl)
+
+
 def check_tethering_interception(timeout: float = 2.5) -> Tuple[bool, str]:
     """Проверяет перехват трафика мобильным оператором (Captive Portal / редирект тетеринга).
     
@@ -126,21 +141,6 @@ def check_tethering_interception(timeout: float = 2.5) -> Tuple[bool, str]:
             continue
 
     return False, "Перехват HTTP-трафика оператором не обнаружен"
-
-
-class RedirectionException(Exception):
-    def __init__(self, location: str):
-        self.location = location
-
-
-class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if fp:
-            try:
-                fp.close()
-            except Exception:
-                pass
-        raise RedirectionException(newurl)
 
 
 def check_sni_behavior(target_ip: str, blocked_host: str, whitelisted_host: str) -> Tuple[bool, bool]:
@@ -233,15 +233,26 @@ class NetworkDetector:
         self.results["dns_udp_53_open"] = dns_open
 
         ip_reachable_count = 0
+        resolved_sample_ip = None
         for t in BLOCKED_TARGETS:
-            if check_port_open(t["ip"], t["port"]):
+            target_ip = t["ip"]
+            try:
+                resolved = socket.gethostbyname(t["host"])
+                if resolved:
+                    target_ip = resolved
+            except Exception:
+                pass
+            if resolved_sample_ip is None:
+                resolved_sample_ip = target_ip
+            if check_port_open(target_ip, t["port"]):
                 ip_reachable_count += 1
         self.results["ip_routing_open"] = (ip_reachable_count > 0)
         self.results["reachable_ips_ratio"] = f"{ip_reachable_count}/{len(BLOCKED_TARGETS)}"
 
         # Проверка реакции L7 на YouTube IP
         sample = BLOCKED_TARGETS[0]
-        blocked_ok, white_ok = check_sni_behavior(sample["ip"], sample["host"], active_whitelisted_sni)
+        probe_ip = resolved_sample_ip or sample["ip"]
+        blocked_ok, white_ok = check_sni_behavior(probe_ip, sample["host"], active_whitelisted_sni)
         self.results["blocked_sni_passes"] = blocked_ok
         self.results["whitelisted_sni_passes"] = white_ok
 

@@ -1,5 +1,6 @@
 @echo off
-title Flowery (Glue) - DPI Bypass for Mobile Tethering
+chcp 65001 >nul
+title Flowery (Glue) — DPI Bypass & Tethering Mask for Windows
 
 REM Enable ANSI / Virtual Terminal Processing in Windows Console
 reg add "HKCU\Console" /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
@@ -17,7 +18,7 @@ net session >nul 2>&1
 if %errorlevel% neq 0 (
     if "%~1" neq "elevated" (
         echo [*] Requesting Administrator privileges...
-        powershell -NoProfile -Command "Start-Process cmd.exe -ArgumentList '/k', 'cd /d \"%~dp0\" && start.bat elevated' -Verb RunAs" 2>nul
+        powershell -NoProfile -Command "Start-Process cmd.exe -WorkingDirectory '%~dp0.' -ArgumentList '/k', 'start.bat elevated' -Verb RunAs" 2>nul
         if %errorlevel% equ 0 exit /b
         echo [!] Could not elevate automatically. Running in standard mode...
     )
@@ -30,8 +31,8 @@ if not defined PY_CMD (
     where py >nul 2>&1 && set "PY_CMD=py"
 )
 if not defined PY_CMD (
-    if exist "%LocalAppData%\Programs\Python\Python311\python.exe" (
-        set "PY_CMD=%LocalAppData%\Programs\Python\Python311\python.exe"
+    for /d %%D in ("%LocalAppData%\Programs\Python\Python3*") do (
+        if exist "%%D\python.exe" set "PY_CMD=%%D\python.exe"
     )
 )
 

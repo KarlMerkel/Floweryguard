@@ -46,3 +46,4 @@ GEMINI.md
 scratch/
 *.log
 *.tmp
+strategy_scores.json

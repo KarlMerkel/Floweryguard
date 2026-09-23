@@ -22,7 +22,7 @@ def refresh_system_proxy_settings() -> None:
         print(f"[!] Не удалось обновить WinINet настройки: {e}")
 
 
-def build_proxy_override(proxy_discord: bool = True, proxy_youtube: bool = False) -> str:
+def build_proxy_override(proxy_discord: bool = True, proxy_youtube: bool = True) -> str:
     """Формирует список исключений ProxyOverride в зависимости от режима."""
     overrides = []
 
@@ -30,7 +30,11 @@ def build_proxy_override(proxy_discord: bool = True, proxy_youtube: bool = False
     if not proxy_discord:
         overrides.extend([
             "*.discord.com", "*.discord.gg", "*.discord.media", "*.discordapp.com", "*.discordapp.net",
-            "discord.com", "discord.gg", "discord.media", "discordapp.com", "discordapp.net"
+            "discord.com", "discord.gg", "discord.media", "discordapp.com", "discordapp.net",
+            "*.discord.co", "*.discordcdn.com", "*.discord.dev", "*.discord.new", "*.discord.gift",
+            "*.discord-activities.com", "*.discordactivities.com", "*.dis.gd",
+            "discord.co", "discordcdn.com", "discord.dev", "discord.new", "discord.gift",
+            "discord-activities.com", "discordactivities.com", "dis.gd"
         ])
 
     # Если YouTube НЕ проксируется через Flowery, исключаем его (отдаем в zapret)
@@ -49,7 +53,7 @@ class SystemProxyManager:
 
     def __init__(self, proxy_address: str = "127.0.0.1:8118", proxy_override: Optional[str] = None):
         self.proxy_address = proxy_address
-        self.proxy_override = proxy_override or build_proxy_override(proxy_discord=True, proxy_youtube=False)
+        self.proxy_override = proxy_override or build_proxy_override(proxy_discord=True, proxy_youtube=True)
         self.original_enable: Optional[int] = None
         self.original_server: Optional[str] = None
         self.original_override: Optional[str] = None
@@ -78,10 +82,25 @@ class SystemProxyManager:
             print(f"[!] Ошибка чтения настроек прокси: {e}")
         return enable, server, override
 
+    def is_stale_proxy_present(self) -> bool:
+        """Проверяет, остались ли настройки прокси от предыдущего некорректно завершенного сеанса."""
+        enable, server, _ = self.get_current_settings()
+        return enable == 1 and (self.proxy_address in server if server else False)
+
     def enable(self) -> bool:
         """Включает системный прокси и перенаправляет трафик."""
         try:
-            self.original_enable, self.original_server, self.original_override = self.get_current_settings()
+            cur_enable, cur_server, cur_override = self.get_current_settings()
+
+            # Защита от сохранения нашего же прокси как 'оригинального' при падении прошлой сессии
+            if cur_server and self.proxy_address in cur_server:
+                self.original_enable = 0
+                self.original_server = None
+                self.original_override = None
+            else:
+                self.original_enable = cur_enable
+                self.original_server = cur_server
+                self.original_override = cur_override
 
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, INTERNET_SETTINGS_KEY, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
@@ -105,7 +124,7 @@ class SystemProxyManager:
                 prev_enable = self.original_enable if (self.original_enable is not None and not force) else 0
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, prev_enable)
 
-                if self.original_server:
+                if self.original_server and self.proxy_address not in self.original_server:
                     winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, self.original_server)
                 else:
                     try:
@@ -126,4 +145,22 @@ class SystemProxyManager:
             return True
         except Exception as e:
             print(f"[!] Ошибка отключения системного прокси: {e}")
+            return False
+
+    def force_cleanup(self) -> bool:
+        """Принудительно сбрасывает настройки прокси Windows до состояния по умолчанию."""
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, INTERNET_SETTINGS_KEY, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                try:
+                    cur_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+                    if cur_server and self.proxy_address in cur_server:
+                        winreg.DeleteValue(key, "ProxyServer")
+                except Exception:
+                    pass
+            refresh_system_proxy_settings()
+            self._is_active = False
+            return True
+        except Exception as e:
+            print(f"[!] Ошибка принудительного сброса прокси: {e}")
             return False

@@ -10,6 +10,7 @@ import argparse
 import atexit
 import shutil
 import ctypes
+import threading
 
 # Включение поддержки ANSI цветов (VT100) и кодировки UTF-8 в Windows
 def init_terminal():
@@ -57,6 +58,7 @@ from Floweryguard.dns_config import DNSManager
 from Floweryguard.proxy import DPIBypassProxy
 from Floweryguard.tester import test_proxy_connection
 from Floweryguard.detector import NetworkDetector
+from Floweryguard.voice_helper import VoiceHelper
 
 # Полноразмерный ASCII-арт цветка (для терминалов шириной >= 120 символов)
 FLOWER_FULL = r"""
@@ -186,13 +188,41 @@ class FloweryApp:
         self.dns_mgr = DNSManager(self.config.dns_primary, self.config.dns_secondary)
         self.proxy_server = DPIBypassProxy(self.config)
         self.detector = NetworkDetector()
+        self.voice_helper = VoiceHelper()
         self._is_active = False
+        self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
+        self._timer_period_active = False
         if sys.platform == "win32":
             try:
                 ctypes.windll.winmm.timeBeginPeriod(1)
+                self._timer_period_active = True
             except Exception:
                 pass
+
+        # Защита от сбоев: авто-очистка брошенного системного прокси
+        if self.proxy_mgr.is_stale_proxy_present():
+            print("\033[93m[!] Обнаружен системный прокси от аварийно завершенного сеанса.\033[0m")
+            print("\033[93m[*] Выполняется автоматическая нормализация сетевых настроек Windows...\033[0m")
+            self.proxy_mgr.force_cleanup()
+
+    def reset_system(self) -> None:
+        """Полный принудительный сброс всех сетевых параметров Windows в дефолтное состояние."""
+        print("\033[96m[*] Запуск сброса параметров Windows (прокси, QUIC, TTL, DNS)...\033[0m")
+        self.proxy_mgr.force_cleanup()
+        print("  \033[92m[+]\033[0m Системный прокси Windows отключен")
+        if is_admin():
+            if self.quic_blocker.is_rule_present():
+                self.quic_blocker.unblock_quic()
+                print("  \033[92m[+]\033[0m Правило блокировки QUIC удалено из Windows Firewall")
+            if self.ttl_mgr.restore_ttl():
+                print("  \033[92m[+]\033[0m Значение DefaultTTL восстановлено")
+            self.dns_mgr.restore_dns()
+            print("  \033[92m[+]\033[0m Сетевые DNS возвращены к DHCP")
+        else:
+            print("  \033[93m[!]\033[0m Для сброса брандмауэра и TTL требуются права Администратора")
+        self.voice_helper.stop()
+        print("\033[92m[+] Все параметры успешно возвращены к дефолтным значениям.\033[0m")
 
     def print_banner(self) -> None:
         """Отображает цветной стартовый баннер с автоматической подгонкой под ширину экрана."""
@@ -210,7 +240,7 @@ class FloweryApp:
         print("\033[96m" + GLUE_ASCII.strip("\n") + "\033[0m")
 
         indent = max(0, (min(cols, 80) - 47) // 2)
-        print("\033[1;97m" + " "*indent + "FLOWERY (GLUE) v1.0 — DPI BYPASS FOR TETHERING" + "\033[0m")
+        print("\033[1;97m" + " "*indent + "FLOWERY (GLUE) v1.1 — DPI BYPASS FOR TETHERING" + "\033[0m")
         print("\033[90m" + " "*indent + "Работает в связке с Flowseal zapret (WinDivert)" + "\033[0m\n")
 
     def run_status(self) -> None:
@@ -233,9 +263,12 @@ class FloweryApp:
 
     def cleanup(self, force: bool = False) -> None:
         """Гарантированное восстановление всех системных параметров."""
-        if not force and (not self._is_active or self._cleaned_up):
-            return
-        self._cleaned_up = True
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return
+            if not force and not self._is_active:
+                return
+            self._cleaned_up = True
 
         print("\n\033[93m[*] Завершение работы Flowery, восстановление системы...\033[0m")
 
@@ -245,18 +278,24 @@ class FloweryApp:
         except Exception:
             pass
 
+        # 1.5. Останавливаем Discord Voice UDP Helper
+        try:
+            self.voice_helper.stop()
+        except Exception:
+            pass
+
         # 2. Восстанавливаем системный прокси
         if self.config.auto_system_proxy:
             print("  [*] Отключение системного прокси Windows...")
             self.proxy_mgr.disable(force=True)
 
         # 3. Удаляем правило блокировки QUIC
-        if self.config.block_quic:
+        if is_admin() and (self.config.block_quic or self.quic_blocker._blocked or self.quic_blocker.is_rule_present()):
             print("  [*] Удаление правила QUIC в Windows Firewall...")
             self.quic_blocker.unblock_quic()
 
         # 4. Восстанавливаем TTL
-        if self.config.fix_ttl and is_admin():
+        if is_admin() and (self.config.fix_ttl or self.ttl_mgr._applied):
             print("  [*] Восстановление DefaultTTL в реестре...")
             self.ttl_mgr.restore_ttl()
 
@@ -265,9 +304,10 @@ class FloweryApp:
             self.dns_mgr.restore_dns()
 
         # 6. Восстанавливаем разрешение таймера Windows
-        if sys.platform == "win32":
+        if sys.platform == "win32" and self._timer_period_active:
             try:
                 ctypes.windll.winmm.timeEndPeriod(1)
+                self._timer_period_active = False
             except Exception:
                 pass
 
@@ -336,8 +376,12 @@ class FloweryApp:
             else:
                 print("\033[91m[!] Не удалось установить системный прокси Windows.\033[0m")
 
+        # 6. Discord Voice UDP Helper (десинхронизация портов 50000-50100 для войсов)
+        if self.config.discord_voice_udp:
+            self.voice_helper.start()
+
         print("\n\033[1;92m" + "="*70 + "\033[0m")
-        print("\033[1;92m[+] Flowery (Glue) успешно активен! Запустите рядом zapret (Flowseal).\033[0m")
+        print("\033[1;92m[+] Flowery (Glue) успешно активен! (Обход блокировок + Discord Voice активны)\033[0m")
         print("\033[97m    Нажмите \033[93mCtrl+C\033[0m\033[97m для остановки и корректного восстановления настроек.\033[0m")
         print("\033[1;92m" + "="*70 + "\033[0m\n")
 
@@ -353,14 +397,26 @@ class FloweryApp:
 
 def main():
     parser = argparse.ArgumentParser(description="Flowery (Glue) — DPI bypass tool для мобильного тетеринга")
-    parser.add_argument("--all", action="store_true", default=True, help="Запустить полный комплекс (по умолчанию)")
+    parser.add_argument("--all", action="store_true", default=False, help="Запустить полный комплекс (по умолчанию)")
     parser.add_argument("--status", action="store_true", help="Показать текущий статус сетевых параметров")
     parser.add_argument("--test", action="store_true", help="Проверить доступность заблокированных сайтов")
     parser.add_argument("--detect", action="store_true", help="Автоматический анализ типа ограничений сети")
     parser.add_argument("--fix-ttl", action="store_true", help="Только зафиксировать TTL")
+    parser.add_argument("--clean", "--reset", dest="clean", action="store_true", help="Сбросить все системные настройки Windows (прокси, firewall, TTL, DNS) без запуска")
+    parser.add_argument("--strategy", type=str, default=None, help="Принудительно зафиксировать стратегию обхода (combo_tlsrec_tcpsplit, multi_split, tcp_split_sni_mid, boringssl_split и др.)")
+    parser.add_argument("--no-auto-strategy", action="store_true", help="Отключить адаптивный автоподбор стратегий Thompson Sampling")
     args = parser.parse_args()
 
     app = FloweryApp()
+    if args.strategy:
+        app.config.set_override("default_strategy", args.strategy)
+        app.config.set_override("auto_strategy", False)
+        app.proxy_server.strategy_engine.enabled = False
+        print(f"\033[93m[*] Принудительно зафиксирована стратегия: {args.strategy}\033[0m")
+    elif args.no_auto_strategy:
+        app.config.set_override("auto_strategy", False)
+        app.proxy_server.strategy_engine.enabled = False
+        print("\033[93m[*] Адаптивный автоподбор стратегий отключён\033[0m")
     atexit.register(app.cleanup)
 
     def sig_handler(signum, frame):
@@ -383,7 +439,10 @@ def main():
         except Exception:
             pass
 
-    if args.status:
+    if args.clean:
+        app.print_banner()
+        app.reset_system()
+    elif args.status:
         app.run_status()
     elif args.detect:
         app.print_banner()

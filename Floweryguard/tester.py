@@ -79,6 +79,34 @@ def test_proxy_connection(proxy_host: str = "127.0.0.1", proxy_port: int = 8118)
             print(f"  [\033[91m-\033[0m] {name:<20} ({host:<22}) -> \033[91m{err_display}\033[0m ({elapsed} мс)")
             results.append({"name": name, "host": host, "status": False, "latency": elapsed, "error": err_msg})
 
+    # Проверка Discord Voice UDP WebRTC (IP Discovery / STUN)
+    print("\033[96m[*] Проверка голосового транспорта Discord (UDP WebRTC)...\033[0m")
+    import struct
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.settimeout(2.0)
+    packet = struct.pack('>HHI64sH', 1, 70, 181451, b'', 0)
+    test_rtc_ip = "35.217.11.71"
+    test_rtc_port = 50007
+    udp_ok = False
+    try:
+        udp_start = time.time()
+        udp_sock.sendto(packet, (test_rtc_ip, test_rtc_port))
+        resp, _ = udp_sock.recvfrom(1024)
+        udp_elapsed = int((time.time() - udp_start) * 1000)
+        if len(resp) >= 70:
+            udp_ok = True
+            print(f"  [\033[92m+\033[0m] {'Discord Voice UDP':<20} ({test_rtc_ip}:{test_rtc_port:<17}) -> \033[92mOK (WebRTC активен)\033[0m ({udp_elapsed} мс)")
+            results.append({"name": "Discord Voice UDP", "host": test_rtc_ip, "status": True, "latency": udp_elapsed})
+    except Exception:
+        pass
+    finally:
+        udp_sock.close()
+
+    if not udp_ok:
+        print(f"  [\033[93m!\033[0m] {'Discord Voice UDP':<20} ({test_rtc_ip}:{test_rtc_port:<17}) -> \033[93mUDP блокируется провайдером\033[0m")
+        print("      \033[90m-> Для войсов убедитесь, что start.bat запущен от имени Администратора\033[0m")
+        results.append({"name": "Discord Voice UDP", "host": test_rtc_ip, "status": False, "error": "UDP blocked"})
+
     print()
     return results
 

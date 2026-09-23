@@ -74,10 +74,12 @@ class TTLManager:
                 pass
 
             if self.enable_timestamps:
+                creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                 subprocess.run(
                     ["netsh", "interface", "tcp", "set", "global", "timestamps=enabled"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    creationflags=creationflags,
                     check=False
                 )
 

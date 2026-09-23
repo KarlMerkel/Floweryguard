@@ -12,7 +12,10 @@ from Floweryguard.tls_parser import is_tls_client_hello, parse_sni
 
 def build_fake_client_hello(whitelisted_sni: str) -> bytes:
     """Генерирует валидный минимальный TLS ClientHello с указанным доверенным SNI (например, gosuslugi.ru)."""
-    host_bytes = whitelisted_sni.encode("ascii")
+    try:
+        host_bytes = whitelisted_sni.encode("idna")
+    except Exception:
+        host_bytes = whitelisted_sni.encode("ascii", errors="ignore")
     # SNI extension (Type 0x0000)
     sni_data = (
         b"\x00"  # host_name type
