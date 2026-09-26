@@ -60,3 +60,26 @@ ntc.party
 cloudflare.com
 one.one.one.one
 virustotal.com
+
+# Ресурсы Tor Project и независимые СМИ
+torproject.org
+*.torproject.org
+meduza.io
+*.meduza.io
+flibusta.is
+*.flibusta.is
+linkedin.com
+*.linkedin.com
+bbc.com
+*.bbc.com
+dw.com
+*.dw.com
+
+# Сервисы измерения скорости интернета (Speedtest Ookla)
+speedtest.net
+*.speedtest.net
+c.speedtest.net
+ookla.com
+*.ookla.com
+ooklaserver.net
+*.ooklaserver.net

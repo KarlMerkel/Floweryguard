@@ -1,7 +1,13 @@
-"""Модульный тест новых DPI-bypass техник и алгоритма Thompson Sampling."""
-
+import os
+import sys
 import socket
 import unittest
+
+# Обеспечиваем импорт Floweryguard при автономном запуске файла
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from Floweryguard.tls_parser import (
     is_tls_client_hello,
     parse_sni,
@@ -203,15 +209,102 @@ class TestDPIStrategies(unittest.TestCase):
     def test_flowery_app_lifecycle(self):
         from Floweryguard.main import FloweryApp
         app = FloweryApp()
+        app.config.set_override("auto_system_proxy", False)
+        app.config.set_override("fix_ttl", False)
+        app.config.set_override("block_quic", False)
+        app.config.set_override("enable_custom_dns", False)
         self.assertFalse(app._is_active)
         self.assertFalse(app._cleaned_up)
         # cleanup без force при неактивном приложении выходит без изменений
         app.cleanup()
         self.assertFalse(app._cleaned_up)
-        # cleanup с force=True гарантированно выполняется
+        # cleanup с force=True гарантированно выполняется без сброса настроек пользователя
         app.cleanup(force=True)
         self.assertTrue(app._cleaned_up)
+
+    def test_composite_key_subnet(self):
+        selector = ThompsonStrategySelector(enabled=True)
+        self.assertEqual(selector._get_composite_key("sub.example.com", "1.2.3.4"), "example.com:1.2.3.0/24")
+        self.assertEqual(selector._get_composite_key("example.com", None), "example.com")
+        self.assertEqual(selector._get_composite_key("example.com", "invalid-ip"), "example.com")
+
+    def test_fallback_strategy_selection(self):
+        selector = ThompsonStrategySelector(enabled=True)
+        # Для YouTube сбой disoob_sni должен дать другую стратегию
+        fb_yt = selector.get_fallback_strategy("youtube.com", failed_strategy="disoob_sni", is_youtube=True)
+        self.assertNotEqual(fb_yt, "disoob_sni")
+        self.assertIn(fb_yt, ["tcp_split_sni_mid", "boringssl_split", "multi_split"])
+
+        # Для Discord сбой combo_tlsrec_tcpsplit должен дать direct или tls_record_frag
+        fb_dc = selector.get_fallback_strategy("discord.gg", failed_strategy="combo_tlsrec_tcpsplit", is_discord=True)
+        self.assertNotEqual(fb_dc, "combo_tlsrec_tcpsplit")
+        self.assertIn(fb_dc, ["direct", "tls_record_frag", "tcp_split_sni_mid"])
+
+        # Для общего домена сбой combo_tlsrec_tcpsplit должен дать альтернативу
+        fb_gen = selector.get_fallback_strategy("rutracker.org", failed_strategy="combo_tlsrec_tcpsplit")
+        self.assertNotEqual(fb_gen, "combo_tlsrec_tcpsplit")
+
+    def test_tspu_penalty_distinction(self):
+        selector = ThompsonStrategySelector(enabled=True)
+        domain = "penalty-test.org"
+        ip = "93.184.216.34"
+        key = selector._get_composite_key(domain, ip)
+
+        # Мягкий штраф (реальный сбой сети)
+        selector.record_failure(domain, "combo_tlsrec_tcpsplit", ip=ip, is_tspu=False)
+        beta_soft = selector._scores[key]["combo_tlsrec_tcpsplit"][1]
+        self.assertAlmostEqual(beta_soft, 1.0 + 3.0, places=1)
+
+        # Жесткий штраф (ТСПУ блокировка)
+        selector.record_failure(domain, "combo_tlsrec_tcpsplit", ip=ip, is_tspu=True)
+        beta_hard = selector._scores[key]["combo_tlsrec_tcpsplit"][1]
+        self.assertAlmostEqual(beta_hard, beta_soft + 20.0, places=1)
+
+    def test_socket_meta_lifecycle(self):
+        from Floweryguard.proxy import _set_socket_meta, _get_socket_meta, _safe_close_socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            _set_socket_meta(s, "104.21.55.2", 0.038)
+            meta = _get_socket_meta(s)
+            self.assertEqual(meta.get("target_ip"), "104.21.55.2")
+            self.assertAlmostEqual(meta.get("connect_rtt", 0.0), 0.038, places=3)
+        finally:
+            _safe_close_socket(s)
+
+        # После safe_close сокет должен быть очищен из метаданных
+        meta_after = _get_socket_meta(s)
+        self.assertEqual(meta_after, {})
+
+    def test_shadow_prober_filtering_and_throttling(self):
+        from Floweryguard.proxy import ShadowProber
+        selector = ThompsonStrategySelector(enabled=True)
+        prober = ShadowProber(selector)
+
+        # 1. Телеметрия и метрики должны отсеиваться
+        prober.maybe_enqueue("telemetry.discord.com")
+        self.assertEqual(prober.task_queue.qsize(), 0)
+        prober.maybe_enqueue("analytics.google.com")
+        self.assertEqual(prober.task_queue.qsize(), 0)
+
+        # 2. Хосты с уже высокой статистикой успеха (alpha >= 3) должны отсеиваться
+        known_host = "known-good-site.com"
+        known_key = selector._get_composite_key(known_host, "1.1.1.1")
+        with selector._lock:
+            selector._scores[known_key] = {"combo_tlsrec_tcpsplit": [5.0, 1.0]}
+        prober.maybe_enqueue(known_host, ip="1.1.1.1")
+        self.assertEqual(prober.task_queue.qsize(), 0)
+
+        # 3. Новый хост должен успешно ставиться в очередь
+        new_host = "unknown-test-probe.org"
+        prober.maybe_enqueue(new_host)
+        # Должен попасть в очередь (1 элемент)
+        self.assertEqual(prober.task_queue.qsize(), 1)
+
+        # 4. Повторный enqueue того же хоста блокируется кулдауном 15 минут
+        prober.maybe_enqueue(new_host)
+        self.assertEqual(prober.task_queue.qsize(), 1)
 
 
 if __name__ == "__main__":
     unittest.main()
+

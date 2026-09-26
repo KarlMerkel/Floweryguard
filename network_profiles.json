@@ -1,0 +1,7 @@
+{
+  "last_active_profile": "home_wifi",
+  "network_map": {
+    "gw:192.168.3.0/24": "home_wifi"
+  },
+  "custom_profiles": {}
+}

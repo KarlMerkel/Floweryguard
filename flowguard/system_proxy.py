@@ -44,7 +44,7 @@ def build_proxy_override(proxy_discord: bool = True, proxy_youtube: bool = True)
             "*.ytimg.com", "ytimg.com", "youtu.be"
         ])
 
-    overrides.extend(["127.*", "localhost", "<local>"])
+    overrides.extend(["127.0.0.1", "127.*", "localhost", "::1", "<local>"])
     return ";".join(overrides)
 
 
@@ -85,7 +85,22 @@ class SystemProxyManager:
     def is_stale_proxy_present(self) -> bool:
         """Проверяет, остались ли настройки прокси от предыдущего некорректно завершенного сеанса."""
         enable, server, _ = self.get_current_settings()
-        return enable == 1 and (self.proxy_address in server if server else False)
+        if enable != 1 or not server or self.proxy_address not in server:
+            return False
+        # Проверяем, запущен ли реальный процесс прокси на этом адресе:порту
+        try:
+            import socket
+            host, port_str = self.proxy_address.split(":")
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            res = s.connect_ex((host, int(port_str)))
+            s.close()
+            if res == 0:
+                # Прокси активен и принимает соединения — он не брошен!
+                return False
+        except Exception:
+            pass
+        return True
 
     def enable(self) -> bool:
         """Включает системный прокси и перенаправляет трафик."""

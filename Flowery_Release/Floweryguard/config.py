@@ -24,7 +24,7 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "discord_voice_udp": True,
         "proxy_youtube": True,
         "timeout": 15,
-        "buffer_size": 65536,
+        "buffer_size": 131072,
     },
     "bypass": {
         "tcp_split": True,
@@ -43,7 +43,7 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "enable_timestamps": True,
     },
     "quic": {
-        "block_quic": False,
+        "block_quic": True,
     },
     "dns": {
         "primary": "1.1.1.1",
@@ -62,7 +62,7 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     },
     "strategy": {
         "auto_strategy": True,
-        "default_strategy": "disoob_sni",
+        "default_strategy": "tcp_split_sni_mid",
     },
 }
 
@@ -99,6 +99,27 @@ class Config:
     def set_override(self, key: str, value: Any) -> None:
         """Устанавливает динамическое переопределение параметра во время работы."""
         self._overrides[key] = value
+
+    def set_value(self, section: str, key: str, value: Any) -> None:
+        """Устанавливает значение параметра в конфиге и обновляет кэш."""
+        if not self._parser.has_section(section):
+            self._parser.add_section(section)
+        str_val = str(value).lower() if isinstance(value, bool) else str(value)
+        self._parser.set(section, key, str_val)
+        self._overrides[key] = value
+
+    def save(self, filepath: Optional[str] = None) -> bool:
+        """Сохраняет текущую конфигурацию в файл config.ini."""
+        target_path = filepath or self.config_path
+        if not target_path:
+            return False
+        try:
+            with open(target_path, "w", encoding="utf-8") as f:
+                self._parser.write(f)
+            return True
+        except Exception as e:
+            print(f"[!] Ошибка сохранения config.ini ({target_path}): {e}")
+            return False
 
     def apply_profile(self, profile: Dict[str, Any]) -> None:
         """Применяет профиль настроек, сформированный авто-детектором сети."""

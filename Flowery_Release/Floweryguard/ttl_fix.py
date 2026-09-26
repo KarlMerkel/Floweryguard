@@ -22,6 +22,56 @@ def is_admin() -> bool:
         return False
 
 
+def check_admin_or_elevate(auto_elevate: bool = True) -> bool:
+    """Проверяет наличие прав администратора.
+    Если прав нет:
+    - Запрашивает повышение прав через ShellExecuteW 'runas'.
+    - Если пользователь нажал 'Нет' / отказался от UAC, или права не получены:
+      выводит предупреждение и ЗАВЕРШАЕТ процесс. Приложение не открывается без прав админа!
+    """
+    if is_admin():
+        return True
+
+    if auto_elevate and sys.platform == "win32":
+        try:
+            if getattr(sys, "frozen", False):
+                exe = sys.executable
+                params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
+            else:
+                exe = sys.executable
+                params = f'"{os.path.abspath(sys.argv[0])}" ' + " ".join([f'"{arg}"' for arg in sys.argv[1:]])
+
+            # 1 = SW_SHOWNORMAL
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+            if ret > 32:
+                # Повышенный процесс успешно запущен, непривилегированный родитель немедленно закрывается
+                sys.exit(0)
+        except Exception:
+            pass
+
+    # Если права не получены или пользователь отклонил UAC запрос:
+    err_title = "Flowery (Glue) — Доступ запрещён"
+    err_text = (
+        "Flowery требует обязательных прав Администратора для работы:\n\n"
+        " • Установка DefaultTTL в реестре (обход ограничений тетеринга)\n"
+        " • Блокировка QUIC в Windows Firewall\n"
+        " • Управление DNS и системным прокси\n\n"
+        "Запустите программу от имени Администратора!"
+    )
+    print(f"\n\033[91m[X] ОШИБКА: {err_text}\033[0m\n")
+    if sys.platform == "win32" and not os.environ.get("FLOWERY_NO_POPUP"):
+        try:
+            is_tty = bool(sys.stdin and hasattr(sys.stdin, "isatty") and sys.stdin.isatty())
+            if not is_tty:
+                if hasattr(ctypes.windll.user32, "MessageBoxTimeoutW"):
+                    ctypes.windll.user32.MessageBoxTimeoutW(0, err_text, err_title, 0x10 | 0x0 | 0x10000, 0, 4000)
+                else:
+                    ctypes.windll.user32.MessageBoxW(0, err_text, err_title, 0x10 | 0x0 | 0x10000)
+        except Exception:
+            pass
+    sys.exit(1)
+
+
 class TTLManager:
     """Класс управления TTL и TCP Timestamps."""
 

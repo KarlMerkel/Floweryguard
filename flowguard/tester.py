@@ -25,6 +25,7 @@ TEST_TARGETS = [
     {"name": "Twitter / X", "host": "x.com", "port": 443},
     {"name": "Rutracker", "host": "rutracker.org", "port": 443},
     {"name": "Cloudflare DNS", "host": "one.one.one.one", "port": 443},
+    {"name": "NTC Party", "host": "ntc.party", "port": 443},
 ]
 
 

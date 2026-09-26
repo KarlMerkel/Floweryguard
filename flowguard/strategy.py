@@ -21,6 +21,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 from Floweryguard.config import get_app_base_dir
+from Floweryguard.logger import get_logger
+
+logger = get_logger("Strategy")
 from Floweryguard.tls_parser import (
     is_tls_client_hello,
     parse_sni,
@@ -206,10 +209,45 @@ class ThompsonStrategySelector:
         if cache_file is None:
             base_dir = get_app_base_dir()
             self.cache_file = os.path.join(base_dir, "strategy_scores.json")
+            self.overrides_file = os.path.join(base_dir, "strategy_overrides.json")
         else:
             self.cache_file = cache_file
+            self.overrides_file = None
 
+        self._strategy_overrides: Dict[str, str] = {}
+        self._allowed_strategies: Optional[Set[str]] = None
         self._load_scores()
+        self._load_overrides()
+
+    def _load_overrides(self) -> None:
+        """Загружает жесткие пользовательские привязки стратегий к доменам (strategy_overrides.json)."""
+        if not self.overrides_file or not os.path.exists(self.overrides_file):
+            return
+        try:
+            with open(self.overrides_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                with self._lock:
+                    self._strategy_overrides = {k.lower().strip("."): str(v) for k, v in data.items()}
+        except Exception:
+            pass
+
+    def configure_allowed(self, tcp_split: bool = True, tls_record_frag: bool = True, oob_data: bool = True) -> None:
+        """Связывает тумблеры из config.ini с движком диспетчеризации стратегий."""
+        allowed = set(ALL_STRATEGIES)
+        if not tcp_split:
+            allowed.discard("tcp_split_sni_start")
+            allowed.discard("tcp_split_sni_mid")
+            allowed.discard("multi_split")
+            allowed.discard("boringssl_split")
+            allowed.discard("combo_tlsrec_tcpsplit")
+        if not tls_record_frag:
+            allowed.discard("tls_record_frag")
+            allowed.discard("combo_tlsrec_tcpsplit")
+        if not oob_data:
+            allowed.discard("disoob_sni")
+        with self._lock:
+            self._allowed_strategies = allowed
 
     def _load_scores(self) -> None:
         """Загружает сохраненную статистику обучения из JSON-файла."""
@@ -285,6 +323,19 @@ class ThompsonStrategySelector:
             return ".".join(parts[-2:])
         return h
 
+    def _get_composite_key(self, host: str, ip: Optional[str] = None) -> str:
+        """Создает составной ключ (домен + подсеть /24) для исключения CDN-аномалий."""
+        domain = self._get_domain_key(host)
+        if not ip:
+            return domain
+        try:
+            parts = ip.split(".")
+            if len(parts) == 4:
+                return f"{domain}:{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+        except Exception:
+            pass
+        return domain
+
     def _init_domain_priors(self, domain_key: str, is_youtube: bool, is_discord: bool) -> Dict[str, List[float]]:
         """Инициализирует априорные веса (priors) для известных типов сервисов."""
         scores = {}
@@ -325,42 +376,59 @@ class ThompsonStrategySelector:
             scores["dummy_record_prepend"] = [0.1, 50.0]
             scores["boringssl_split"] = [0.1, 50.0]
         else:
-            # Универсальный приоритет для остальных ресурсов (Cloudflare, NTC, X, Rutracker и др.)
-            # combo_tlsrec_tcpsplit наиболее совместима с Cloudflare и современными CDN
-            scores["combo_tlsrec_tcpsplit"] = [25.0, 1.0]
-            scores["tcp_split_sni_mid"] = [10.0, 1.0]
-            scores["tls_record_frag"] = [8.0, 2.0]
-            scores["disoob_sni"] = [5.0, 2.0]
-            scores["multi_split"] = [2.0, 5.0]
-            scores["dummy_record_prepend"] = [1.0, 5.0]
+            # Универсальный приоритет для остальных ресурсов (Cloudflare, Fastly, Ookla, Speedtest, NTC, X, Rutracker и др.)
+            # Сбалансированный стартовый prior [16.0, 2.0] (ожидание ~89%) вместо чрезмерно оптимистичного [40.0, 1.0].
+            # Это позволяет бандиту всего за 5-10 сбоев/silent drop на мобильном тетеринге
+            # оперативно передать лидерство combo_tlsrec_tcpsplit [8.0, 2.0].
+            scores["tcp_split_sni_mid"] = [16.0, 2.0]
+            scores["combo_tlsrec_tcpsplit"] = [8.0, 2.0]
+            scores["multi_split"] = [4.0, 3.0]
+            scores["tls_record_frag"] = [3.0, 3.0]
+            scores["direct"] = [2.0, 5.0]
+            scores["boringssl_split"] = [1.0, 10.0]
+            scores["tcp_split_sni_start"] = [1.0, 10.0]
+            scores["disoob_sni"] = [0.1, 50.0]
+            scores["dummy_record_prepend"] = [0.1, 50.0]
 
         return scores
 
-    def select_strategy(self, host: str, is_youtube: bool = False, is_discord: bool = False) -> str:
+    def select_strategy(self, host: str, is_youtube: bool = False, is_discord: bool = False, ip: Optional[str] = None) -> str:
         """Выбирает оптимальную стратегию для данного хоста с использованием Thompson Sampling."""
-        if not self.enabled:
-            return "direct" if is_discord else "disoob_sni"
+        # 1. Проверяем ручные переопределения пользователя (strategy_overrides.json)
+        h_clean = host.lower().strip(".")
+        d_clean = self._get_domain_key(host)
+        if h_clean in self._strategy_overrides:
+            return self._strategy_overrides[h_clean]
+        if d_clean in self._strategy_overrides:
+            return self._strategy_overrides[d_clean]
 
-        domain_key = self._get_domain_key(host)
+        if not self.enabled:
+            return "direct" if is_discord else ("disoob_sni" if is_youtube else "tcp_split_sni_mid")
+
+        key = self._get_composite_key(host, ip)
 
         with self._lock:
-            if domain_key not in self._scores:
+            if key not in self._scores:
                 self._trim_capacity_locked()
-                self._scores[domain_key] = self._init_domain_priors(domain_key, is_youtube, is_discord)
+                self._scores[key] = self._init_domain_priors(key, is_youtube, is_discord)
                 self._dirty = True
 
-            candidates = self._scores[domain_key]
+            candidates = self._scores[key]
 
             # Ограничения несовместимости протоколов
             excluded = set()
             if is_youtube:
                 excluded.update(["tls_record_frag", "combo_tlsrec_tcpsplit", "dummy_record_prepend"])
-            if is_discord:
-                # Cloudflare отклоняет соединения с посторонними записями перед ClientHello
-                # и сбрасывает TCP при наличии OOB Urgent данных (disoob_sni)
+            else:
+                # Все сайты кроме YouTube (Cloudflare, NTC.party, X, Rutracker и др.)
+                # сбрасывают TCP при наличии OOB Urgent данных (disoob_sni) и dummy записей
                 excluded.update(["dummy_record_prepend", "boringssl_split", "disoob_sni"])
 
-            best_strategy = "direct" if is_discord else "disoob_sni"
+            # Принудительное исключение техник, отключенных в config.ini ([bypass])
+            if self._allowed_strategies is not None:
+                excluded.update(set(candidates.keys()) - self._allowed_strategies)
+
+            best_strategy = "direct" if is_discord else ("disoob_sni" if is_youtube else "tcp_split_sni_mid")
             max_sample = -1.0
 
             for strat_name, (alpha, beta) in candidates.items():
@@ -372,46 +440,72 @@ class ThompsonStrategySelector:
                     max_sample = sample
                     best_strategy = strat_name
 
+            if best_strategy not in candidates:
+                best_strategy = next(iter(candidates.keys())) if candidates else "tcp_split_sni_mid"
+
             # Логируем выбор стратегии при первом использовании или смене
-            prev = self._logged_strategies.get(domain_key)
+            prev = self._logged_strategies.get(key)
             if prev != best_strategy:
-                self._logged_strategies[domain_key] = best_strategy
-                print(f"\033[95m[Auto-Strategy]\033[0m {domain_key:<20} -> \033[93m{best_strategy}\033[0m (alpha={candidates[best_strategy][0]:.1f}, beta={candidates[best_strategy][1]:.1f})")
+                self._logged_strategies[key] = best_strategy
+                logger.info(f"[Auto-Strategy] {key:<28} -> {best_strategy} (alpha={candidates[best_strategy][0]:.1f}, beta={candidates[best_strategy][1]:.1f})")
 
             return best_strategy
 
-    def record_success(self, host: str, strategy: str) -> None:
+    def get_fallback_strategy(
+        self,
+        host: str,
+        failed_strategy: str = "",
+        is_youtube: bool = False,
+        is_discord: bool = False,
+        ip: Optional[str] = None
+    ) -> str:
+        """Возвращает сильнейшую альтернативную стратегию обхода при подтвержденном сбросе ТСПУ."""
+        if is_youtube:
+            candidates = ["disoob_sni", "tcp_split_sni_mid", "boringssl_split", "multi_split"]
+        elif is_discord:
+            candidates = ["combo_tlsrec_tcpsplit", "direct", "tls_record_frag", "tcp_split_sni_mid"]
+        else:
+            candidates = ["tcp_split_sni_mid", "multi_split", "direct", "combo_tlsrec_tcpsplit"]
+
+        for strat in candidates:
+            if strat != failed_strategy:
+                return strat
+        return "direct"
+
+    def record_success(self, host: str, strategy: str, ip: Optional[str] = None) -> None:
         """Фиксирует успешное соединение и ответ сервера."""
-        domain_key = self._get_domain_key(host)
+        key = self._get_composite_key(host, ip)
         with self._lock:
-            if domain_key not in self._scores:
+            if key not in self._scores:
                 self._trim_capacity_locked()
-                self._scores[domain_key] = self._init_domain_priors(domain_key, False, False)
-            if strategy in self._scores[domain_key]:
-                self._scores[domain_key][strategy][0] += 1.0  # Увеличиваем alpha
+                self._scores[key] = self._init_domain_priors(key, False, False)
+            if strategy in self._scores[key]:
+                self._scores[key][strategy][0] += 1.0  # Увеличиваем alpha
                 # Decay / capping при накоплении статистики для сохранения адаптивности
-                total = self._scores[domain_key][strategy][0] + self._scores[domain_key][strategy][1]
+                total = self._scores[key][strategy][0] + self._scores[key][strategy][1]
                 if total > 200.0:
-                    self._scores[domain_key][strategy][0] = max(0.1, self._scores[domain_key][strategy][0] * 0.5)
-                    self._scores[domain_key][strategy][1] = max(0.1, self._scores[domain_key][strategy][1] * 0.5)
+                    self._scores[key][strategy][0] = max(0.1, self._scores[key][strategy][0] * 0.5)
+                    self._scores[key][strategy][1] = max(0.1, self._scores[key][strategy][1] * 0.5)
                 self._dirty = True
         self.save_scores(force=False)
 
-    def record_failure(self, host: str, strategy: str) -> None:
-        """Фиксирует ошибку соединения (сброс ТСПУ, таймаут)."""
-        domain_key = self._get_domain_key(host)
+    def record_failure(self, host: str, strategy: str, ip: Optional[str] = None, is_tspu: bool = True) -> None:
+        """Фиксирует ошибку соединения. При подтвержденном сбросе ТСПУ налагается максимальный штраф."""
+        key = self._get_composite_key(host, ip)
+        penalty = 20.0 if is_tspu else 3.0
+        alpha_mult = 0.3 if is_tspu else 0.85
         with self._lock:
-            if domain_key not in self._scores:
+            if key not in self._scores:
                 self._trim_capacity_locked()
-                self._scores[domain_key] = self._init_domain_priors(domain_key, False, False)
-            if strategy in self._scores[domain_key]:
-                self._scores[domain_key][strategy][1] += 20.0  # Моментально пенализируем (beta += 20)
-                self._scores[domain_key][strategy][0] = max(0.1, self._scores[domain_key][strategy][0] * 0.4)
+                self._scores[key] = self._init_domain_priors(key, False, False)
+            if strategy in self._scores[key]:
+                self._scores[key][strategy][1] += penalty
+                self._scores[key][strategy][0] = max(0.1, self._scores[key][strategy][0] * alpha_mult)
                 # Decay / capping при накоплении статистики для сохранения адаптивности
-                total = self._scores[domain_key][strategy][0] + self._scores[domain_key][strategy][1]
+                total = self._scores[key][strategy][0] + self._scores[key][strategy][1]
                 if total > 200.0:
-                    self._scores[domain_key][strategy][0] = max(0.1, self._scores[domain_key][strategy][0] * 0.5)
-                    self._scores[domain_key][strategy][1] = max(0.1, self._scores[domain_key][strategy][1] * 0.5)
+                    self._scores[key][strategy][0] = max(0.1, self._scores[key][strategy][0] * 0.5)
+                    self._scores[key][strategy][1] = max(0.1, self._scores[key][strategy][1] * 0.5)
                 self._dirty = True
         self.save_scores(force=False)
 
