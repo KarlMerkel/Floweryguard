@@ -6,13 +6,13 @@
 """
 
 import socket
-import struct
-import time
 import urllib.request
 import urllib.parse
-from typing import Dict, Any, Tuple, Optional
-from Floweryguard.tls_parser import is_tls_client_hello, parse_sni
-from Floweryguard.ttl_fix import TTLManager
+from typing import Dict, Any, Tuple
+from flowguard.ttl_fix import TTLManager
+from flowguard.logger import get_logger
+
+logger = get_logger("Detector")
 
 # Проверочные цели для белого списка
 WHITELIST_SNI_CANDIDATES = ["gosuslugi.ru", "vk.com", "yandex.ru", "sberbank.ru"]
@@ -38,18 +38,21 @@ def check_port_open(ip: str, port: int, timeout: float = 2.0) -> bool:
     """Проверяет доступность TCP порта на удаленном IP (L3/L4 маршрутизация)."""
     s = None
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        s = socket.socket(family, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((ip, port))
+        logger.debug(f"check_port_open({ip}:{port}) -> True")
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug(f"check_port_open({ip}:{port}) -> False ({e})")
         return False
     finally:
         if s:
             try:
                 s.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Ошибка закрытия сокета check_port_open: {e}")
 
 
 def check_dns_udp(dns_ip: str, port: int = 53, timeout: float = 2.0) -> bool:
@@ -62,19 +65,23 @@ def check_dns_udp(dns_ip: str, port: int = 53, timeout: float = 2.0) -> bool:
             packet += bytes([len(part)]) + part.encode("ascii")
         packet += b"\x00\x00\x01\x00\x01"
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        family = socket.AF_INET6 if ":" in dns_ip else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
         sock.sendto(packet, (dns_ip, port))
         data, _ = sock.recvfrom(512)
-        return len(data) > 12 and data[0:2] == b"\x12\x34"
-    except Exception:
+        is_ok = len(data) > 12 and data[0:2] == b"\x12\x34"
+        logger.debug(f"check_dns_udp({dns_ip}:{port}) -> {is_ok}")
+        return is_ok
+    except Exception as e:
+        logger.debug(f"check_dns_udp({dns_ip}:{port}) -> False ({e})")
         return False
     finally:
         if sock:
             try:
                 sock.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Ошибка закрытия сокета check_dns_udp: {e}")
 
 
 class RedirectionException(Exception):
@@ -87,8 +94,8 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         if fp:
             try:
                 fp.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"NoRedirectHandler fp.close exception: {e}")
         raise RedirectionException(newurl)
 
 
@@ -118,28 +125,42 @@ def check_tethering_interception(timeout: float = 2.5) -> Tuple[bool, str]:
                 # Если произошел редирект на операторский шлюз
                 for kw in OPERATOR_PORTAL_KEYWORDS:
                     if kw in redirect_url.lower():
+                        logger.warning(f"Обнаружен редирект тетеринга на портал оператора: {redirect_url}")
                         return True, f"Редирект на портал оператора: {redirect_url}"
 
                 # Читаем тело ответа
                 body = resp.read().decode("utf-8", errors="ignore").lower()
                 for kw in TETHERING_HTML_KEYWORDS:
                     if kw in body:
+                        logger.warning(f"Страница оператора сообщает об ограничении раздачи: '{kw}'")
                         return True, f"Страница оператора сообщает об ограничении раздачи: '{kw}'"
 
                 # Если ожидали текст, но получили что-то чужое
                 if expected_text and expected_text.lower() not in body:
                     # Потенциальный перехват
                     if any(op in body for op in OPERATOR_PORTAL_KEYWORDS):
+                        logger.warning("Обнаружен перехват HTTP порталом оператора")
                         return True, "Обнаружен перехват HTTP порталом оператора"
 
         except RedirectionException as re:
             loc = re.location.lower()
             for kw in OPERATOR_PORTAL_KEYWORDS:
                 if kw in loc:
+                    logger.warning(f"Перехват тетеринга: редирект на {re.location}")
                     return True, f"Перехват тетеринга: редирект на {re.location}"
-        except Exception:
+            try:
+                parsed_orig = urllib.parse.urlparse(url)
+                parsed_loc = urllib.parse.urlparse(re.location)
+                if parsed_loc.netloc and parsed_loc.netloc.lower() != parsed_orig.netloc.lower():
+                    logger.warning(f"Перехват порталом оператора: {parsed_orig.netloc} -> {parsed_loc.netloc}")
+                    return True, f"Перехват порталом оператора: редирект с {parsed_orig.netloc} на {parsed_loc.netloc}"
+            except Exception as e:
+                logger.debug(f"Ошибка парсинга URL редиректа: {e}")
+        except Exception as e:
+            logger.debug(f"Ошибка проверки probe URL '{url}': {e}")
             continue
 
+    logger.debug("check_tethering_interception: перехват не обнаружен")
     return False, "Перехват HTTP-трафика оператором не обнаружен"
 
 
@@ -151,11 +172,16 @@ def check_sni_behavior(target_ip: str, blocked_host: str, whitelisted_host: str)
     def send_probe(sni_domain: str) -> bool:
         s = None
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
+            s = socket.socket(family, socket.SOCK_STREAM)
             s.settimeout(2.5)
             s.connect((target_ip, 443))
 
-            host_b = sni_domain.encode("ascii")
+            try:
+                host_b = sni_domain.encode("idna")
+            except Exception as e:
+                logger.debug(f"IDNA encode error for '{sni_domain}': {e}")
+                host_b = sni_domain.encode("ascii", errors="ignore")
             sni_ext = b"\x00\x00" + (len(host_b) + 5).to_bytes(2, "big")
             sni_ext += (len(host_b) + 3).to_bytes(2, "big") + b"\x00" + len(host_b).to_bytes(2, "big") + host_b
             exts = len(sni_ext).to_bytes(2, "big") + sni_ext
@@ -167,18 +193,22 @@ def check_sni_behavior(target_ip: str, blocked_host: str, whitelisted_host: str)
             s.sendall(pkt)
             resp = s.recv(1024)
             # Если получен валидный ответ TLS (ServerHello 0x16 или Alert 0x15)
-            return len(resp) > 0 and resp[0] in [0x15, 0x16]
-        except Exception:
+            is_valid = len(resp) > 0 and resp[0] in [0x15, 0x16]
+            logger.debug(f"send_probe(sni='{sni_domain}') -> {is_valid}")
+            return is_valid
+        except Exception as e:
+            logger.debug(f"send_probe(sni='{sni_domain}') exception: {e}")
             return False
         finally:
             if s:
                 try:
                     s.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"send_probe s.close error: {e}")
 
     blocked_res = send_probe(blocked_host)
     white_res = send_probe(whitelisted_host)
+    logger.debug(f"check_sni_behavior on {target_ip}: blocked={blocked_res}, whitelisted={white_res}")
     return blocked_res, white_res
 
 
@@ -191,6 +221,7 @@ class NetworkDetector:
 
     def run_full_diagnosis(self) -> Dict[str, Any]:
         """Проводит комплексное сканирование обоих типов ограничений."""
+        logger.info("Запуск комплексного анализа сети (Тетеринг + Белые списки / DPI)...")
         print("\033[96m[*] Запуск комплексного анализа сети (Тетеринг + Белые списки / DPI)...\033[0m")
 
         # -------------------------------------------------------------
@@ -200,10 +231,12 @@ class NetworkDetector:
         ttl_vulnerable = (curr_ttl_v4 != 65)
         self.results["ttl_v4_current"] = curr_ttl_v4 or 128
         self.results["ttl_vulnerable"] = ttl_vulnerable
+        logger.info(f"Диагностика TTL: current={curr_ttl_v4}, vulnerable={ttl_vulnerable}")
 
         tether_blocked, tether_details = check_tethering_interception()
         self.results["tethering_blocked"] = tether_blocked
         self.results["tethering_details"] = tether_details
+        logger.info(f"Диагностика перехвата тетеринга: {tether_blocked} ({tether_details})")
 
         # -------------------------------------------------------------
         # АНАЛИЗ 2: Доступность белого списка
@@ -217,10 +250,12 @@ class NetworkDetector:
                     whitelisted_ok = True
                     active_whitelisted_sni = sni
                     break
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ошибка проверки белого списка для '{sni}': {e}")
                 continue
         self.results["whitelisted_accessible"] = whitelisted_ok
         self.results["active_whitelisted_sni"] = active_whitelisted_sni
+        logger.info(f"Диагностика доступности белого списка: {whitelisted_ok} (активный SNI={active_whitelisted_sni})")
 
         # -------------------------------------------------------------
         # АНАЛИЗ 3: Доступность внешнего интернета и L7 фильтрация
@@ -231,6 +266,7 @@ class NetworkDetector:
                 dns_open = True
                 break
         self.results["dns_udp_53_open"] = dns_open
+        logger.info(f"Диагностика внешнего DNS (UDP 53): {'ОТКРЫТ' if dns_open else 'ЗАКРЫТ'}")
 
         ip_reachable_count = 0
         resolved_sample_ip = None
@@ -240,14 +276,15 @@ class NetworkDetector:
                 resolved = socket.gethostbyname(t["host"])
                 if resolved:
                     target_ip = resolved
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Ошибка DNS резолва {t['host']}: {e}")
             if resolved_sample_ip is None:
                 resolved_sample_ip = target_ip
             if check_port_open(target_ip, t["port"]):
                 ip_reachable_count += 1
         self.results["ip_routing_open"] = (ip_reachable_count > 0)
         self.results["reachable_ips_ratio"] = f"{ip_reachable_count}/{len(BLOCKED_TARGETS)}"
+        logger.info(f"Диагностика маршрутизации IP: {self.results['reachable_ips_ratio']} доступно")
 
         # Проверка реакции L7 на YouTube IP
         sample = BLOCKED_TARGETS[0]
@@ -255,6 +292,7 @@ class NetworkDetector:
         blocked_ok, white_ok = check_sni_behavior(probe_ip, sample["host"], active_whitelisted_sni)
         self.results["blocked_sni_passes"] = blocked_ok
         self.results["whitelisted_sni_passes"] = white_ok
+        logger.info(f"Диагностика L7 SNI: blocked_sni={blocked_ok}, whitelisted_sni={white_ok}")
 
         # -------------------------------------------------------------
         # КЛАССИФИКАЦИЯ И ВЫБОР РЕЖИМА
@@ -324,6 +362,7 @@ class NetworkDetector:
         self.results["detected_mode"] = mode
         self.results["summary"] = summary
         self.results["profile_overrides"] = profile_overrides
+        logger.info(f"Диагностический вердикт: {mode} ({summary})")
         return self.results
 
     def print_report(self) -> None:
@@ -340,6 +379,8 @@ class NetworkDetector:
         dns_open = self.results.get("dns_udp_53_open", False)
         ip_open = self.results.get("ip_routing_open", False)
         sni_chosen = self.results.get("active_whitelisted_sni", "gosuslugi.ru")
+
+        logger.info(f"Отчет детектора сети: mode={mode}, summary={summary}, ttl={ttl_val}, tethering={tether_blocked}")
 
         ttl_status = "\033[91mУЯЗВИМ (128 - палится раздача)\033[0m" if ttl_vuln else "\033[92mЗАЩИЩЁН (65)\033[0m"
         tether_status = f"\033[91mОБНАРУЖЕН ({tether_details})\033[0m" if tether_blocked else "\033[92mНЕТ ПЕРЕХВАТА\033[0m"

@@ -8,6 +8,14 @@ import fnmatch
 import configparser
 from typing import Dict, Any, Tuple, Optional
 
+try:
+    from Floweryguard.logger import get_logger
+except ImportError:
+    from flowguard.logger import get_logger
+
+logger = get_logger("Config")
+
+
 def get_app_base_dir() -> str:
     """Get application base directory (safe for frozen .exe and .py)."""
     if getattr(sys, "frozen", False):
@@ -24,31 +32,42 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "discord_voice_udp": True,
         "proxy_youtube": True,
         "timeout": 15,
-        "buffer_size": 131072,
+        "buffer_size": 262144,
+        "ipv6_mode": "disabled",
+        "early_connect": True,
     },
     "bypass": {
         "tcp_split": True,
         "tls_record_frag": True,
-        "oob_data": True,
+        "oob_data": False,
         "http_host_obfuscation": True,
+        "strip_ech": False,
+        "tls_padding": False,
     },
     "fragmentation": {
         "fragment_size": 3,
-        "fragment_delay": 0.005,  # 5 мс задержка между сегментами
+        "fragment_delay": 0.001,  # 1 мс — гарантирует физическое разделение сегментов на мобильных сетях (Nagle/GSO)
         "tlsrec_split_at_sni": True,
     },
     "tethering": {
         "fix_ttl": True,
         "default_ttl": 65,
         "enable_timestamps": True,
+        "mask_user_agent": True,
+        "ncsi_spoof": True,
+        "clamp_mss": True,
+        "target_mtu": 1420,
     },
     "quic": {
         "block_quic": True,
     },
     "dns": {
-        "primary": "1.1.1.1",
-        "secondary": "8.8.8.8",
+        "server": "Quad9",
+        "primary": "9.9.9.9",
+        "secondary": "149.112.112.112",
         "enable_custom_dns": False,
+        "doh_url": "https://dns.quad9.net/dns-query",
+        "doh_name": "Quad9",
     },
     "whitelist_bypass": {
         "auto_detect": False,
@@ -56,13 +75,35 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "whitelisted_sni": "gosuslugi.ru",
         "fake_sni_record": False,
     },
+    "mode": {
+        "kind": "proxy",
+    },
     "targets": {
         "whitelist_file": "whitelist.txt",
         "only_target_domains": False,
+        "use_hosts_file": False,
     },
     "strategy": {
         "auto_strategy": True,
-        "default_strategy": "tcp_split_sni_mid",
+        "default_strategy": "combo_tlsrec_tcpsplit",
+    },
+    "desync": {
+        "enabled": True,
+        "fooling": "badsum",
+        "autottl": True,
+        "autottl_delta": 2,
+        "ttl": 8,
+        "repeats": 6,
+        "tcp_fake_desync": False,
+        "fake_tls_file": "tls_clienthello_www_google_com.bin",
+        "split_seqovl": 0,
+    },
+    "support": {
+        "report_transport": "gateway",
+        "report_gateway_url": "",
+        "telegram_bot_token": "",
+        "telegram_chat_id": "",
+        "discord_webhook_url": "",
     },
 }
 
@@ -90,11 +131,19 @@ class Config:
                 actual_path = p
                 break
         if actual_path:
-            self.config_path = actual_path
+            meipass = getattr(sys, "_MEIPASS", "")
+            if getattr(sys, "frozen", False) and meipass and actual_path.startswith(meipass):
+                self.config_path = os.path.join(get_app_base_dir(), os.path.basename(self.config_path))
+            else:
+                self.config_path = actual_path
             try:
-                self._parser.read(self.config_path, encoding="utf-8")
+                self._parser.read(actual_path, encoding="utf-8")
+                logger.info(f"Конфигурация загружена: {actual_path}")
             except Exception as e:
+                logger.warning(f"Ошибка чтения config.ini ({e}), используются стандартные параметры.")
                 print(f"[!] Ошибка чтения config.ini ({e}), используются стандартные параметры.")
+        else:
+            logger.info("Файл config.ini не найден, используются параметры по умолчанию.")
 
     def set_override(self, key: str, value: Any) -> None:
         """Устанавливает динамическое переопределение параметра во время работы."""
@@ -113,11 +162,17 @@ class Config:
         target_path = filepath or self.config_path
         if not target_path:
             return False
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass and target_path and target_path.startswith(meipass):
+                target_path = os.path.join(get_app_base_dir(), "config.ini")
         try:
             with open(target_path, "w", encoding="utf-8") as f:
                 self._parser.write(f)
+            logger.info(f"Конфигурация сохранена: {target_path}")
             return True
         except Exception as e:
+            logger.error(f"Ошибка сохранения config.ini ({target_path}): {e}")
             print(f"[!] Ошибка сохранения config.ini ({target_path}): {e}")
             return False
 
@@ -132,31 +187,34 @@ class Config:
         fallback = str(DEFAULT_CONFIG.get(section, {}).get(key, ""))
         try:
             return self._parser.get(section, key, fallback=fallback)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ошибка get_str([{section}] {key}): {e}")
             return fallback
 
     def get_int(self, section: str, key: str) -> int:
         if key in self._overrides:
             try:
                 return int(self._overrides[key])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Ошибка парсинга override get_int({key}): {e}")
         fallback = int(DEFAULT_CONFIG.get(section, {}).get(key, 0))
         try:
             return self._parser.getint(section, key, fallback=fallback)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ошибка get_int([{section}] {key}): {e}")
             return fallback
 
     def get_float(self, section: str, key: str) -> float:
         if key in self._overrides:
             try:
                 return float(self._overrides[key])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Ошибка парсинга override get_float({key}): {e}")
         fallback = float(DEFAULT_CONFIG.get(section, {}).get(key, 0.0))
         try:
             return self._parser.getfloat(section, key, fallback=fallback)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ошибка get_float([{section}] {key}): {e}")
             return fallback
 
     def get_bool(self, section: str, key: str) -> bool:
@@ -165,7 +223,8 @@ class Config:
         fallback = bool(DEFAULT_CONFIG.get(section, {}).get(key, False))
         try:
             return self._parser.getboolean(section, key, fallback=fallback)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ошибка get_bool([{section}] {key}): {e}")
             return fallback
 
     @property
@@ -201,6 +260,14 @@ class Config:
         return self.get_int("proxy", "timeout")
 
     @property
+    def ipv6_mode(self) -> str:
+        return self.get_str("proxy", "ipv6_mode")
+
+    @property
+    def early_connect(self) -> bool:
+        return self.get_bool("proxy", "early_connect")
+
+    @property
     def tcp_split(self) -> bool:
         return self.get_bool("bypass", "tcp_split")
 
@@ -215,6 +282,14 @@ class Config:
     @property
     def http_host_obfuscation(self) -> bool:
         return self.get_bool("bypass", "http_host_obfuscation")
+
+    @property
+    def strip_ech(self) -> bool:
+        return self.get_bool("bypass", "strip_ech")
+
+    @property
+    def tls_padding(self) -> bool:
+        return self.get_bool("bypass", "tls_padding")
 
     @property
     def fragment_size(self) -> int:
@@ -241,6 +316,22 @@ class Config:
         return self.get_bool("tethering", "enable_timestamps")
 
     @property
+    def mask_user_agent(self) -> bool:
+        return self.get_bool("tethering", "mask_user_agent")
+
+    @property
+    def clamp_mss(self) -> bool:
+        return self.get_bool("tethering", "clamp_mss")
+
+    @property
+    def target_mtu(self) -> int:
+        return self.get_int("tethering", "target_mtu")
+
+    @property
+    def ncsi_spoof(self) -> bool:
+        return self.get_bool("tethering", "ncsi_spoof")
+
+    @property
     def block_quic(self) -> bool:
         return self.get_bool("quic", "block_quic")
 
@@ -255,6 +346,22 @@ class Config:
     @property
     def enable_custom_dns(self) -> bool:
         return self.get_bool("dns", "enable_custom_dns")
+
+    @property
+    def dns_doh_url(self) -> str:
+        return self.get_str("dns", "doh_url")
+
+    @property
+    def dns_server(self) -> str:
+        return self.get_str("dns", "server")
+
+    @property
+    def server(self) -> str:
+        return self.dns_server
+
+    @property
+    def dns_doh_name(self) -> str:
+        return self.get_str("dns", "doh_name")
 
     @property
     def whitelist_auto_detect(self) -> bool:
@@ -281,12 +388,79 @@ class Config:
         return self.get_bool("targets", "only_target_domains")
 
     @property
+    def use_hosts_file(self) -> bool:
+        return self.get_bool("targets", "use_hosts_file")
+
+    @property
+    def mode_kind(self) -> str:
+        kind = self.get_str("mode", "kind").lower().strip()
+        if kind in ("packet", "hybrid"):
+            return kind
+        return "proxy"
+
+    @property
     def auto_strategy(self) -> bool:
         return self.get_bool("strategy", "auto_strategy")
 
     @property
     def default_strategy(self) -> str:
         return self.get_str("strategy", "default_strategy")
+
+    @property
+    def report_transport(self) -> str:
+        return self.get_str("support", "report_transport")
+
+    @property
+    def report_gateway_url(self) -> str:
+        return self.get_str("support", "report_gateway_url")
+
+    @property
+    def telegram_bot_token(self) -> str:
+        return self.get_str("support", "telegram_bot_token")
+
+    @property
+    def telegram_chat_id(self) -> str:
+        return self.get_str("support", "telegram_chat_id")
+
+    @property
+    def discord_webhook_url(self) -> str:
+        return self.get_str("support", "discord_webhook_url")
+
+    @property
+    def packet_desync_enabled(self) -> bool:
+        return self.get_bool("desync", "enabled")
+
+    @property
+    def packet_desync_fooling(self) -> str:
+        return self.get_str("desync", "fooling")
+
+    @property
+    def packet_desync_autottl(self) -> bool:
+        return self.get_bool("desync", "autottl")
+
+    @property
+    def packet_desync_autottl_delta(self) -> int:
+        return self.get_int("desync", "autottl_delta")
+
+    @property
+    def packet_desync_ttl(self) -> int:
+        return self.get_int("desync", "ttl")
+
+    @property
+    def packet_desync_repeats(self) -> int:
+        return self.get_int("desync", "repeats")
+
+    @property
+    def packet_desync_tcp(self) -> bool:
+        return self.get_bool("desync", "tcp_fake_desync")
+
+    @property
+    def packet_desync_fake_tls(self) -> str:
+        return self.get_str("desync", "fake_tls_file")
+
+    @property
+    def packet_desync_split_seqovl(self) -> int:
+        return self.get_int("desync", "split_seqovl")
 
 
 def load_whitelist_domains(filepath: str = "whitelist.txt") -> Tuple[set, Optional[str]]:
@@ -316,8 +490,12 @@ def load_whitelist_domains(filepath: str = "whitelist.txt") -> Tuple[set, Option
                     line = line.strip()
                     if line and not line.startswith("#"):
                         domains.add(line.lower())
+            logger.info(f"Whitelist загружен: {len(domains)} доменов из {actual_path}")
         except Exception as e:
+            logger.error(f"Ошибка чтения списка доменов {actual_path}: {e}")
             print(f"[!] Ошибка чтения списка доменов {actual_path}: {e}")
+    else:
+        logger.warning(f"Файл whitelist '{filepath}' не найден")
     return domains, actual_path
 
 
@@ -325,7 +503,16 @@ def is_host_in_whitelist(host: str, whitelist: set) -> bool:
     """Проверяет, входит ли хост или SNI в список целевых доменов обхода."""
     if not host or not whitelist:
         return False
-    h = host.lower().strip(".")
+    h = host.lower().strip().strip(".")
+    if h.startswith("["):
+        bracket_end = h.find("]")
+        if bracket_end != -1:
+            h = h[1:bracket_end]
+    elif ":" in h and h.count(":") == 1:
+        h = h.split(":", 1)[0]
+    h = h.strip(".")
+    if not h:
+        return False
     if h in whitelist:
         return True
     parts = h.split(".")

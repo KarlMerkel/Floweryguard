@@ -40,8 +40,8 @@ def get_documents_dir() -> str:
             ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf)
             if buf.value and os.path.isdir(buf.value):
                 return buf.value
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write(f"[Logger] Не удалось получить папку Документы через WinAPI: {e}\n")
 
     # Фолбэки для кроссплатформенности и нестандартных профилей
     home = os.path.expanduser("~")
@@ -55,14 +55,25 @@ def get_documents_dir() -> str:
 
 
 def get_log_dir() -> str:
-    """Возвращает директорию для логов Flowery внутри папки 'Документы'."""
+    """Возвращает директорию для логов Flowery.
+    При наличии переменной окружения FLOWERY_HOME логи пишутся в $FLOWERY_HOME/logs,
+    что исключает загрязнение папки Документы пользователя во время тестов (B7).
+    """
+    flowery_home = os.environ.get("FLOWERY_HOME")
+    if flowery_home:
+        path = os.path.join(flowery_home, "logs")
+        try:
+            os.makedirs(path, exist_ok=True)
+            return path
+        except Exception as e:
+            sys.stderr.write(f"[Logger] Не удалось создать директорию логов '{path}': {e}\n")
     doc_dir = get_documents_dir()
     path = os.path.join(doc_dir, "Flowery", "logs")
     try:
         os.makedirs(path, exist_ok=True)
         return path
-    except Exception:
-        pass
+    except Exception as e:
+        sys.stderr.write(f"[Logger] Не удалось создать директорию логов '{path}': {e}\n")
     # Фолбэк на временную папку или локальную
     fallback = os.path.join(os.environ.get("TEMP", os.getcwd()), "Flowery_logs")
     os.makedirs(fallback, exist_ok=True)
@@ -71,23 +82,34 @@ def get_log_dir() -> str:
 
 def _get_app_version() -> str:
     try:
-        from Floweryguard import __version__
+        try:
+            from Floweryguard import __version__
+        except ImportError:
+            from flowguard import __version__
         return __version__
     except Exception:
-        return "1.2.0"
+        try:
+            from Floweryguard import __version__
+            return __version__
+        except Exception:
+            return "1.3.0"
 
 
 # Единый путь к файлу текущей запущенной сессии: Flowery_v<версия>_<время_запуска>.log
 _SESSION_TIMESTAMP = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-_CURRENT_LOG_FILE = os.path.join(
-    get_log_dir(),
-    f"Flowery_v{_get_app_version()}_{_SESSION_TIMESTAMP}.log"
-)
+_CURRENT_LOG_FILE: Optional[str] = None
 _LOGGER: Optional[logging.Logger] = None
 
 
 def get_current_log_path() -> str:
     """Возвращает полный путь к файлу логов текущей сессии."""
+    global _CURRENT_LOG_FILE
+    expected_dir = get_log_dir()
+    if _CURRENT_LOG_FILE is None or os.path.dirname(_CURRENT_LOG_FILE) != expected_dir:
+        _CURRENT_LOG_FILE = os.path.join(
+            expected_dir,
+            f"Flowery_v{_get_app_version()}_{_SESSION_TIMESTAMP}.log"
+        )
     return _CURRENT_LOG_FILE
 
 
@@ -112,18 +134,67 @@ def open_current_log_file() -> bool:
         return False
 
 
-def setup_logger() -> logging.Logger:
-    """Настраивает логгер Flowery на запись в отдельный файл сессии в Документах."""
-    global _LOGGER
-    if _LOGGER is not None:
-        return _LOGGER
+def cleanup_old_logs(max_age_days: int = 7) -> int:
+    """Удаляет файлы логов старше max_age_days дней. Возвращает количество удалённых."""
+    log_dir = get_log_dir()
+    removed = 0
+    cutoff = datetime.datetime.now().timestamp() - (max_age_days * 86400)
+    try:
+        for fname in os.listdir(log_dir):
+            if fname.startswith("Flowery_v") and fname.endswith(".log"):
+                fpath = os.path.join(log_dir, fname)
+                try:
+                    if os.path.getmtime(fpath) < cutoff:
+                        os.remove(fpath)
+                        removed += 1
+                except Exception as e:
+                    sys.stderr.write(f"[Logger] Не удалось удалить старый лог {fpath}: {e}\n")
+    except Exception as e:
+        sys.stderr.write(f"[Logger] Ошибка при очистке старых логов: {e}\n")
+    return removed
 
+
+def setup_logger(force_reconfigure: bool = False) -> logging.Logger:
+    """Настраивает логгер Flowery на запись в отдельный файл сессии в Документах (или FLOWERY_HOME)."""
+    global _LOGGER, _CURRENT_LOG_FILE
+    expected_dir = get_log_dir()
     logger = logging.getLogger("Flowery")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
+    # Дедупликация хэндлеров: исключаем повторное добавление FileHandler (B11)
+    file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
+    if file_handlers and not force_reconfigure:
+        current_h = file_handlers[0]
+        base_dir = os.path.dirname(getattr(current_h, "baseFilename", ""))
+        if os.path.normpath(base_dir) == os.path.normpath(expected_dir):
+            for extra_h in file_handlers[1:]:
+                logger.removeHandler(extra_h)
+                try:
+                    extra_h.close()
+                except Exception:
+                    pass
+            _LOGGER = logger
+            return logger
+        else:
+            # Директория логов изменилась (например, задан FLOWERY_HOME во время тестов)
+            for h in file_handlers:
+                logger.removeHandler(h)
+                try:
+                    h.close()
+                except Exception:
+                    pass
+            _CURRENT_LOG_FILE = None
+
+    log_file = get_current_log_path()
+
     try:
-        handler = logging.FileHandler(_CURRENT_LOG_FILE, encoding="utf-8", mode="a")
+        cleanup_old_logs(7)
+    except Exception as e:
+        sys.stderr.write(f"[Logger] Ошибка автоматической ротации логов: {e}\n")
+
+    try:
+        handler = logging.FileHandler(log_file, encoding="utf-8", mode="a")
         formatter = AnsiStrippingFormatter(
             "%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
@@ -131,9 +202,19 @@ def setup_logger() -> logging.Logger:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.info(f"=== Flowery v{_get_app_version()} Сессия запущена ({_SESSION_TIMESTAMP}) ===")
-        logger.info(f"Файл логов: {_CURRENT_LOG_FILE}")
-    except Exception:
-        pass
+        logger.info(f"Файл логов: {log_file}")
+        logger.info(f"Python: {sys.version.replace(chr(10), ' ')}")
+        logger.info(f"Executable: {sys.executable}")
+        logger.info(f"CWD: {os.getcwd()}")
+        logger.info(f"Frozen: {getattr(sys, 'frozen', False)}")
+        try:
+            import platform
+            logger.info(f"OS Platform: {platform.platform()} ({sys.platform})")
+        except Exception:
+            logger.info(f"OS Platform: {sys.platform}")
+        logger.info(f"CLI Аргументы: {sys.argv}")
+    except Exception as e:
+        sys.stderr.write(f"[Logger CRITICAL] Не удалось настроить FileHandler для {log_file}: {e}\n")
 
     _LOGGER = logger
     return logger
