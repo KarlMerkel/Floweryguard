@@ -2534,7 +2534,7 @@ class DPIBypassProxy:
                         # В HTTP/2 (Chromium/Discord) клиент шлет служебные фреймы (WINDOW_UPDATE/PING),
                         # поэтому наличие pending_client_request при уже полученном ответе не является ошибкой или зависанием.
                         client_closed_normally = True
-                        is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024 or self.bytes_tx > 32768) and not is_error_response
+                        is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024) and not is_error_response
                         is_discord_ready = (total_server_bytes > 0 or is_upload_flow or is_discord_media) if is_discord else True
                         if not success_recorded and not is_error_response and is_discord_ready:
                             success_recorded = True
@@ -2585,7 +2585,7 @@ class DPIBypassProxy:
                                     pass
 
                                 now = time.time()
-                                is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024 or self.bytes_tx > 32768) and not is_error_response
+                                is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024) and not is_error_response
                                 if is_upload_flow:
                                     # Успешный upload: клиент передал запрос/тело, сервер ответил (200 OK / etc), сокет штатно закрыт
                                     client_closed_normally = True
@@ -2676,7 +2676,7 @@ class DPIBypassProxy:
                                 continue
                             else:
                                 # Сервер закрыл соединение (EOF) - сессия завершена, не держим клиентский сокет
-                                is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024 or self.bytes_tx > 32768) and not is_error_response
+                                is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024) and not is_error_response
                                 is_discord_ready = (total_server_bytes > 0 or is_upload_flow or is_discord_media) if is_discord else True
                                 if not success_recorded and total_server_bytes > 0 and not is_error_response:
                                     success_recorded = True
@@ -2715,7 +2715,7 @@ class DPIBypassProxy:
                                 pending_client_request = False
 
                             # Фиксируем успех: получение ответа от сервера доказывает успешный обход DPI (не на 4xx/5xx/Alert).
-                            is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024 or self.bytes_tx > 32768) and not is_error_response
+                            is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024) and not is_error_response
                             is_discord_ready = (total_server_bytes >= 32768 or is_upload_flow or is_discord_media) if is_discord else True
                             if not success_recorded and total_server_bytes > 0 and not is_error_response and is_discord_ready:
                                 success_recorded = True
@@ -2735,7 +2735,7 @@ class DPIBypassProxy:
                     except (socket.error, OSError, TimeoutError):
                         has_socket_error = True
                         now = time.time()
-                        is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024 or self.bytes_tx > 32768) and not is_error_response
+                        is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024) and not is_error_response
                         if is_upload_flow:
                             if not success_recorded:
                                 success_recorded = True
@@ -2828,7 +2828,7 @@ class DPIBypassProxy:
                             _RECENT_DISCORD_IPS.set(target_ip, time.time())
             elif not is_client_stalled_abort and (not has_socket_error or client_closed_normally) and (client_closed_normally or total_server_bytes > 0 or server_replied_app_data) and not is_error_response:
                 # Сессия завершилась штатно или данные получены: подтверждаем успех, если не был подтвержден ранее
-                is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024 or self.bytes_tx > 32768) and not is_error_response
+                is_upload_flow = total_server_bytes > 0 and (client_bytes_piped > total_server_bytes or client_bytes_piped > 1024) and not is_error_response
                 is_discord_ready = (total_server_bytes >= 32768 or is_upload_flow or is_discord_media) if is_discord else True
                 if not success_recorded and total_server_bytes > 0 and client_sent_app_data and (is_discord_ready or (client_closed_normally and not is_discord)) and host and strategy and strategy not in ("direct", "http"):
                     if is_discord:
