@@ -51,3 +51,14 @@ strategy_scores.json
 Flowery.spec
 Flowery.exe
 Flowery_Release/Flowery.exe
+
+# Локальные архивы, результаты сборки и резервные копии
+*.zip
+/release/
+/zapret_bin_backup/
+strategy_scores.json.corrupted_bak
+/query
+/ТСПУ/
+.env
+.env.*
+!.env.example
