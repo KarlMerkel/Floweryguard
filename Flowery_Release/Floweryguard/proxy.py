@@ -895,48 +895,17 @@ class DPIBypassProxy:
                 pass
                 pass
 
-    def _reclaim_port(self) -> bool:
-        """Освобождает порт прокси (WinError 10048), если он занят зависшим процессом."""
-        try:
-            import subprocess
-            res = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True,
-                text=True,
-                timeout=3
-            )
-            target = f":{self.port} "
-            pids = set()
-            for line in res.stdout.splitlines():
-                if target in line and "LISTENING" in line:
-                    parts = line.strip().split()
-                    if parts:
-                        pids.add(parts[-1])
-            curr_pid = str(os.getpid())
-            reclaimed = False
-            for pid in pids:
-                if pid != curr_pid and pid != "0":
-                    print(f"\033[93m[!] Порт {self.port} занят процессом PID {pid}. Принудительное освобождение...\033[0m")
-                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=3)
-                    reclaimed = True
-            time.sleep(0.3)
-            return reclaimed
-        except Exception:
-            return False
-
     def start(self) -> None:
         """Запускает слушающий сокет прокси сервера."""
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             self.server_sock.bind((self.host, self.port))
-        except OSError as e:
-            if getattr(e, "winerror", None) == 10048 or getattr(e, "errno", None) == 98:
-                self._reclaim_port()
-                time.sleep(0.3)
-                self.server_sock.bind((self.host, self.port))
-            else:
-                raise
+        except OSError:
+            self.server_sock.close()
+            self.server_sock = None
+            logger.error("Не удалось открыть %s:%s; проверьте, не занят ли порт другой программой", self.host, self.port)
+            raise
         self.server_sock.listen(128)
         self.is_running = True
 

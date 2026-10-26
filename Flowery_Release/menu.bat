@@ -8,8 +8,6 @@ reg add "HKCU\Console" /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
 
 cd /d "%~dp0"
 
-REM Безопасный сброс прокси перед стартом
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1
 
 REM Проверка прав Администратора через несколько быстрых системных механизмов
 net session >nul 2>&1
@@ -58,12 +56,6 @@ exit /b 1
 
 :admin_ok
 
-REM Сброс прокси перед стартом и освобождение порта 8118
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1
-taskkill /f /im Flowery.exe >nul 2>&1
-for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr /i "LISTENING" ^| findstr ":8118"') do (
-    if "%%P" neq "0" taskkill /f /pid %%P >nul 2>&1
-)
 
 REM Фильтрация внутреннего служебного аргумента 'elevated'
 set "EXTRA_ARGS="
@@ -197,9 +189,6 @@ pause
 exit /b 1
 
 :safe_exit
-REM Гарантированное отключение системного прокси при выходе
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1
-powershell -NoProfile -NonInteractive -EncodedCommand JABzAGkAZwAgAD0AIABAACcACgBbAEQAbABsAEkAbQBwAG8AcgB0ACgAIgB3AGkAbgBpAG4AZQB0AC4AZABsAGwAIgApAF0ACgBwAHUAYgBsAGkAYwAgAHMAdABhAHQAaQBjACAAZQB4AHQAZQByAG4AIABiAG8AbwBsACAASQBuAHQAZQByAG4AZQB0AFMAZQB0AE8AcAB0AGkAbwBuACgAaQBuAHQAIABoACwAIABpAG4AdAAgAG8ALAAgAGkAbgB0ACAAYgAsACAAaQBuAHQAIABsACkAOwAKACcAQAAKACQAdwAgAD0AIABBAGQAZAAtAFQAeQBwAGUAIAAtAE0AZQBtAGIAZQByAEQAZQBmAGkAbgBpAHQAaQBvAG4AIAAkAHMAaQBnACAALQBOAGEAbQBlACAAKAAnAFcAJwAgACsAIABbAGcAdQBpAGQAXQA6ADoATgBlAHcARwB1AGkAZAAoACkALgBUAG8AUwB0AHIAaQBuAGcAKAAnAE4AJwApACkAIAAtAFAAYQBzAHMAVABoAHIAdQAKAFsAdgBvAGkAZABdACQAdwA6ADoASQBuAHQAZQByAG4AZQB0AFMAZQB0AE8AcAB0AGkAbwBuACgAMAAsACAAMwA5ACwAIAAwACwAIAAwACkACgBbAHYAbwBpAGQAXQAkAHcAOgA6AEkAbgB0AGUAcgBuAGUAdABTAGUAdABPAHAAdABpAG8AbgAoADAALAAgADMANwAsACAAMAAsACAAMAApAAoA >nul 2>&1
 
 echo.
 if defined EXIT_CODE (

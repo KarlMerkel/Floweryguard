@@ -1674,26 +1674,8 @@ def main():
     # Одиночный экземпляр: авто-перезапуск старых копий без необходимости ручного вызова stop.bat
     if not (args.clean or args.status or args.test or args.detect or args.fix_ttl or args.calibrate):
         if not acquire_single_instance_mutex():
-            print("\033[93m[*] Обнаружен ранее запущенный процесс Flowery. Автоматический перезапуск...\033[0m")
-            if sys.platform == "win32":
-                try:
-                    cur_pid = os.getpid()
-                    target_im = os.path.basename(sys.executable) if getattr(sys, "frozen", False) else "Flowery.exe"
-                    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                    subprocess.run(
-                        ["taskkill", "/f", "/fi", f"PID ne {cur_pid}", "/im", target_im],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False
-                    )
-                    if target_im.lower() != "flowery.exe":
-                        subprocess.run(
-                            ["taskkill", "/f", "/fi", f"PID ne {cur_pid}", "/im", "Flowery.exe"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False
-                        )
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.debug("[Main] taskkill for stale Flowery.exe failed: %s", e)
-            # Повторный захват мьютекса после авто-очистки
-            acquire_single_instance_mutex()
+            print("[*] Flowery уже запущен. Сначала завершите предыдущий экземпляр через меню или Ctrl+C.")
+            return
 
     app = FloweryApp()
 

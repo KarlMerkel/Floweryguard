@@ -291,14 +291,18 @@ class TestFloweryV140Fixes(unittest.TestCase):
         self.assertEqual(cfg_loaded.timeout, 42)
 
     def test_b12_reclaim_port_safeguard(self):
-        """B12: _reclaim_port не завершает посторонние процессы вне app_dir."""
+        """B12: занятый порт возвращает ошибку без запуска taskkill."""
+        from unittest.mock import Mock, patch
         cfg = Config()
         proxy = DPIBypassProxy(config=cfg)
         proxy.port = 18129
-        try:
-            proxy._reclaim_port()
-        except Exception as e:
-            self.fail(f"_reclaim_port raised unexpected exception: {e}")
+        sock = Mock()
+        sock.bind.side_effect = OSError('занято')
+        with patch('flowguard.proxy.socket.socket', return_value=sock), patch('subprocess.run') as run:
+            with self.assertRaises(OSError):
+                proxy.start()
+        run.assert_not_called()
+        sock.close.assert_called_once()
 
     def test_b13_early_connect_safety(self):
         """B13: early_connect не считает хост живым, если все кэшированные IP мертвы."""

@@ -139,9 +139,9 @@ class TestBatchElevation(unittest.TestCase):
             )
             self.assertIn("FLOWERY_TEST_ARGS=['--status']", res.stdout)
 
-    def test_safe_listening_port_cleanup_in_batches(self):
-        """Проверяет, что очистка порта 8118 фильтрует только LISTENING сокеты и не убивает браузеры."""
-        check_batches = ["start.bat", "menu.bat", "stop.bat"]
+    def test_emergency_stop_filter_excludes_client_connections(self):
+        """Аварийный stop.bat не должен выбирать клиентские соединения браузера."""
+        check_batches = ["stop.bat"]
         for bat in check_batches:
             for base_dir in [".", "Flowery_Release"]:
                 path = os.path.join(base_dir, bat)
