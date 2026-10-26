@@ -23,6 +23,7 @@ import queue
 import weakref
 from .route_health import RouteHealth
 from .tls_transport import relay_tls
+from .tls_parser import collect_client_hello
 from typing import Optional, Tuple, List, Dict, Any, Set
 try:
     from flowguard.config import Config, load_whitelist_domains, is_host_in_whitelist
@@ -1112,30 +1113,8 @@ class DPIBypassProxy:
                     return
 
                 # Гарантируем считывание минимум 9 байт для надежного распознавания TLS ClientHello
-                while len(first_packet) < 9:
-                    try:
-                        more = client_sock.recv(self.buffer_size)
-                        if not more:
-                            break
-                        first_packet += more
-                    except Exception:
-                        break
+                first_packet = collect_client_hello(client_sock, first_packet, float(self.timeout))
 
-                # Если это TLS ClientHello, гарантируем считывание всей записи целиком
-                if is_tls_client_hello(first_packet) and len(first_packet) >= 5:
-                    record_len = struct.unpack("!H", first_packet[3:5])[0]
-                    if 4 <= record_len <= 18432:
-                        total_expected = 5 + record_len
-                        while len(first_packet) < total_expected:
-                            try:
-                                more = client_sock.recv(min(self.buffer_size, total_expected - len(first_packet)))
-                                if not more:
-                                    break
-                                first_packet += more
-                            except Exception:
-                                break
-
-                # Выполняем отправку ClientHello с защитой от ТСПУ и бесшовным ретраем
                 target_sock, strat_used, effective_host, init_resp = self._handshake_with_fast_fallback(
                     client_sock, target_sock, target_host, target_port, first_packet
                 )
@@ -2116,8 +2095,10 @@ class DPIBypassProxy:
 
         # Техника 5: Fake Whitelisted SNI Desync (только если явно включено и не для Discord)
         if self.config.whitelist_fake_sni_record and not is_discord:
-            self.sni_spoofer.send_with_fake_sni_desync(target_sock, data)
-            return "fake_sni_record", sni_name
+            if self.sni_spoofer.send_with_fake_sni_desync(target_sock, data):
+                return "fake_sni_record", sni_name
+            target_sock.sendall(data)
+            return "direct", sni_name
 
         # Движок адаптивных стратегий (Thompson Sampling в стиле Nova)
         if self.config.auto_strategy:
@@ -2347,10 +2328,10 @@ class DPIBypassProxy:
             return raw_req
 
         try:
-            if b"\r\nHost: " in raw_req:
-                return raw_req.replace(b"\r\nHost: ", b"\r\nhoSt: ")
-            elif b"\nHost: " in raw_req:
-                return raw_req.replace(b"\nHost: ", b"\nhoSt: ")
+            separator = b"\r\n\r\n" if b"\r\n\r\n" in raw_req else b"\n\n"
+            headers, boundary, body = raw_req.partition(separator)
+            headers = headers.replace(b"\r\nHost: ", b"\r\nhoSt: ").replace(b"\nHost: ", b"\nhoSt: ")
+            return headers + boundary + body
         except Exception:
             pass
         return raw_req

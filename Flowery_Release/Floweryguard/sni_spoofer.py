@@ -100,10 +100,7 @@ def build_fake_http_request(whitelisted_sni: str) -> bytes:
     ).encode("ascii")
 
 
-try:
-    from Floweryguard.badsum_injector import get_badsum_controller
-except ImportError:
-    from flowguard.badsum_injector import get_badsum_controller
+from flowguard.badsum_injector import get_badsum_controller
 
 
 class SNISpoofer:
@@ -132,14 +129,14 @@ class SNISpoofer:
                 logger.debug("WinDivert inject_fake_sni_packet вернул False")
                 return False
 
-            if self.delay > 0:
-                time.sleep(self.delay)
-
-            target_sock.sendall(real_client_hello)
-            return True
         except Exception as e:
             logger.warning("Failed to send TLS with fake SNI desync: %s", e)
             return False
+        if self.delay > 0:
+            time.sleep(self.delay)
+        # Ошибка частичной отправки должна закрыть соединение, а не повторять ClientHello.
+        target_sock.sendall(real_client_hello)
+        return True
 
     def send_with_fake_http_desync(self, target_sock: socket.socket, real_http_req: bytes) -> bool:
         """Отправляет фейковый HTTP GET-запрос с белым Host через WinDivert Badsum инъекцию

@@ -5,9 +5,57 @@
 
 import logging
 import struct
+import time
 from typing import Optional, Tuple, List
 
 logger = logging.getLogger("Flowery.TLSParser")
+
+
+def collect_client_hello(sock, data: bytes, timeout: float, limit: int = 65536) -> bytes:
+    """Дочитывает ClientHello через TLS records, сохраняя исходные байты."""
+    if not data or data[0] != 0x16:
+        return data
+    deadline = time.monotonic() + min(5.0, max(0.1, timeout))
+    previous_timeout = sock.gettimeout()
+
+    def read_to(size):
+        nonlocal data
+        if size > limit:
+            raise ValueError("ClientHello превышает ограничение размера")
+        while len(data) < size:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Истёк срок получения ClientHello")
+            sock.settimeout(remaining)
+            chunk = sock.recv(size - len(data))
+            if not chunk:
+                raise EOFError("ClientHello оборван клиентом")
+            data += chunk
+
+    offset = 0
+    handshake = bytearray()
+    try:
+        while True:
+            read_to(offset + 5)
+            if data[offset] != 0x16 or data[offset + 1] != 3:
+                raise ValueError("Неожиданная TLS-запись внутри ClientHello")
+            record_size = int.from_bytes(data[offset + 3:offset + 5], 'big')
+            if not 0 < record_size <= 16384:
+                raise ValueError("Некорректная длина TLS-записи")
+            end = offset + 5 + record_size
+            read_to(end)
+            handshake.extend(data[offset + 5:end])
+            if handshake[0] != 1:
+                return data
+            if len(handshake) >= 4:
+                expected = 4 + int.from_bytes(handshake[1:4], 'big')
+                if expected > limit:
+                    raise ValueError("ClientHello превышает ограничение размера")
+                if len(handshake) >= expected:
+                    return data
+            offset = end
+    finally:
+        sock.settimeout(previous_timeout)
 
 
 def is_tls_client_hello(data: bytes) -> bool:
