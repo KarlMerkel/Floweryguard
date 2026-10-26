@@ -140,7 +140,8 @@ class TTLManager:
             return False
 
         try:
-            self.original_ttl_v4, self.original_ttl_v6 = self.get_current_ttl()
+            if not self._applied:
+                self.original_ttl_v4, self.original_ttl_v6 = self.get_current_ttl()
             logger.info(f"Текущие значения TTL: IPv4={self.original_ttl_v4}, IPv6={self.original_ttl_v6}")
 
             with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, TCPIP_PARAMS_KEY, 0, winreg.KEY_SET_VALUE) as key:

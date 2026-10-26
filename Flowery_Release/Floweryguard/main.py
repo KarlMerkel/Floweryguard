@@ -1489,7 +1489,7 @@ class FloweryApp:
         # пока порт 8118 еще принимает и закрывает оставшиеся запросы.
         try:
             print("  [*] Отключение системного прокси Windows...")
-            self.proxy_mgr.disable(force=True)
+            self.proxy_mgr.disable()
             logger.info("[Main] SystemProxyManager: системный прокси отключен")
         except Exception as e:
             logger.warning("[Main] SystemProxyManager disable error: %s", e)
@@ -1524,13 +1524,6 @@ class FloweryApp:
             logger.info("[Main] VoiceHelper остановлен")
         except Exception as e:
             logger.debug("[Main] VoiceHelper stop error: %s", e)
-
-        # 2. Повторная гарантия отключения системного прокси
-        if self.config.auto_system_proxy:
-            try:
-                self.proxy_mgr.disable(force=True)
-            except Exception as e:
-                logger.debug("[Main] SystemProxyManager secondary disable error: %s", e)
 
         # 3. Удаляем правило блокировки QUIC
         if is_admin() and (self.config.block_quic or self.quic_blocker._blocked or self.quic_blocker.is_rule_present()):

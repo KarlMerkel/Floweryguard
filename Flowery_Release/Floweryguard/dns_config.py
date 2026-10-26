@@ -332,8 +332,11 @@ class DNSManager:
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         adapters_to_restore = list(self._changed_adapters)
 
+        if not adapters_to_restore and not force_all:
+            return True
+
         # Если запрошен принудительный сброс (например при --clean / stop.bat) или список пуст
-        if force_all or not adapters_to_restore:
+        if force_all:
             for iface in self.get_active_interfaces():
                 if iface not in adapters_to_restore:
                     adapters_to_restore.append(iface)

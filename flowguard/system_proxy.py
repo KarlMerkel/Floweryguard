@@ -177,14 +177,15 @@ class SystemProxyManager:
             cur_enable, cur_server, cur_override = self.get_current_settings()
 
             # Защита от сохранения нашего же прокси как 'оригинального' при падении прошлой сессии
-            if cur_server and self.proxy_address in cur_server:
-                self.original_enable = 0
-                self.original_server = None
-                self.original_override = None
-            else:
-                self.original_enable = cur_enable
-                self.original_server = cur_server
-                self.original_override = cur_override
+            if not self._is_active:
+                if cur_server and self.proxy_address in cur_server:
+                    self.original_enable = 0
+                    self.original_server = None
+                    self.original_override = None
+                else:
+                    self.original_enable = cur_enable
+                    self.original_server = cur_server
+                    self.original_override = cur_override
 
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, INTERNET_SETTINGS_KEY, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
