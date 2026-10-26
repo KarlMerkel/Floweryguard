@@ -267,10 +267,7 @@ class PowerWatchdog:
         health_check_counter = 0
 
         while self.is_running:
-            try:
-                time.sleep(self.check_interval)
-            except Exception as e:
-                logger.debug("PowerWatchdog sleep interrupted: %s", e)
+            if self._stop_event.wait(self.check_interval):
                 break
 
             if not self.is_running:

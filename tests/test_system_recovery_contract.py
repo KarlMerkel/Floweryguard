@@ -89,7 +89,7 @@ class TestRecoveryContract(unittest.TestCase):
         with patch.object(main, 'is_admin', return_value=False), patch.object(main, 'release_single_instance_mutex'):
             self.assertFalse(app.cleanup(force=True))
             self.assertFalse(app._cleaned_up)
-            self.assertTrue(app.cleanup(force=True))
+            self.assertTrue(app.cleanup())
         self.assertEqual(app.proxy_mgr.disable.call_count, 2)
 
     def test_recovery_cannot_write_after_stop(self):

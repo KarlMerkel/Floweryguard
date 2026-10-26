@@ -1442,7 +1442,7 @@ class FloweryApp:
         with self._cleanup_lock:
             if self._cleaned_up:
                 return True
-            if not force and not self._is_active:
+            if not force and not self._is_active and not getattr(self, '_cleanup_pending', False):
                 return False
             self._is_active = False
             failures = []
@@ -1479,6 +1479,7 @@ class FloweryApp:
                     failures.append("таймер Windows")
                     logger.warning("Не удалось восстановить таймер: %s", error)
             self._cleaned_up = not failures
+            self._cleanup_pending = bool(failures)
             if failures:
                 message = "Не завершено восстановление: " + ", ".join(failures)
                 logger.warning(message)
