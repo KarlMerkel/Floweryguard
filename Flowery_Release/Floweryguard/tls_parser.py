@@ -35,6 +35,9 @@ def collect_client_hello(sock, data: bytes, timeout: float, limit: int = 65536) 
     offset = 0
     handshake = bytearray()
     try:
+        read_to(2)
+        if data[1] != 3:
+            return data
         while True:
             read_to(offset + 5)
             if data[offset] != 0x16 or data[offset + 1] != 3:

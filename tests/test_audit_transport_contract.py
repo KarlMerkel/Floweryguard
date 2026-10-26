@@ -31,6 +31,12 @@ class TestAuditTransport(unittest.TestCase):
         with self.assertRaises(EOFError):
             collect_client_hello(sock, b'\x16', 1)
 
+    def test_non_tls_binary_payload_is_not_parsed_as_clienthello(self):
+        sock = Mock()
+        payload = b'\x16\x00PING'
+        self.assertEqual(collect_client_hello(sock, payload, 1), payload)
+        sock.recv.assert_not_called()
+
     def make_proxy(self):
         proxy = object.__new__(DPIBypassProxy)
         proxy.config = Config()
