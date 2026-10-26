@@ -601,21 +601,19 @@ class FloweryApp:
                 self.proxy_mgr.enable()
 
             # Обновление режима десинхронизации пакетов winws при смене профиля
-            if "packet_desync_fooling" in self.config._overrides:
-                new_fooling = self.config._overrides["packet_desync_fooling"]
-                if new_fooling != self.voice_helper.fooling:
-                    self.voice_helper.fooling = new_fooling
-                    if self.voice_helper.is_running() and self.voice_helper.managed_by_us:
-                        logger.info(f"Динамическая смена fooling winws: -> {new_fooling}")
-                        # Закрываем WinDivert handle badsum_injector перед перезапуском winws,
-                        # иначе stale handle к перезагружаемому драйверу вызовет BSOD
-                        try:
-                            from flowguard.badsum_injector import get_badsum_controller
-                            get_badsum_controller().close()
-                        except Exception as e:
-                            logger.debug("[Main] badsum controller close exception: %s", e)
-                        self.voice_helper.stop()
-                        self.voice_helper.start()
+            new_fooling = self.config.packet_desync_fooling
+            if new_fooling != self.voice_helper.tcp_fooling:
+                self.voice_helper.tcp_fooling = new_fooling
+                if self.voice_helper.is_running() and self.voice_helper.managed_by_us:
+                    logger.info(f"Динамическая смена TCP fooling winws: -> {new_fooling}")
+                    # Закрываем WinDivert handle до перезапуска winws.
+                    try:
+                        from flowguard.badsum_injector import get_badsum_controller
+                        get_badsum_controller().close()
+                    except Exception as e:
+                        logger.debug("[Main] badsum controller close exception: %s", e)
+                    self.voice_helper.stop()
+                    self.voice_helper.start()
 
     def reset_system(self) -> None:
         """Полный принудительный сброс всех сетевых параметров Windows в дефолтное состояние."""

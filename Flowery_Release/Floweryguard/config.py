@@ -8,10 +8,7 @@ import fnmatch
 import configparser
 from typing import Dict, Any, Tuple, Optional
 
-try:
-    from Floweryguard.logger import get_logger
-except ImportError:
-    from flowguard.logger import get_logger
+from flowguard.logger import get_logger
 
 logger = get_logger("Config")
 
@@ -115,6 +112,7 @@ class Config:
         self.config_path = config_path
         self._parser = configparser.ConfigParser()
         self._overrides: Dict[str, Any] = {}
+        self._profile_overrides: Dict[str, Any] = {}
         self.load()
 
     def load(self) -> None:
@@ -176,15 +174,22 @@ class Config:
             print(f"[!] Ошибка сохранения config.ini ({target_path}): {e}")
             return False
 
-    def apply_profile(self, profile: Dict[str, Any]) -> None:
-        """Применяет профиль настроек, сформированный авто-детектором сети."""
-        for k, v in profile.items():
-            self._overrides[k] = v
+    def apply_profile(self, profile: Dict[str, Any], replace: bool = False) -> None:
+        """Профиль задаёт значения по умолчанию, сохраняя явный выбор пользователя."""
+        aliases = {
+            "packet_desync_fooling": "fooling",
+            "packet_desync_split_seqovl": "split_seqovl",
+        }
+        settings = {aliases.get(key, key): value for key, value in profile.items()}
+        self._profile_overrides = settings if replace else {**self._profile_overrides, **settings}
+
+    def _fallback(self, section: str, key: str, default: Any) -> Any:
+        return self._profile_overrides.get(key, DEFAULT_CONFIG.get(section, {}).get(key, default))
 
     def get_str(self, section: str, key: str) -> str:
         if key in self._overrides:
             return str(self._overrides[key])
-        fallback = str(DEFAULT_CONFIG.get(section, {}).get(key, ""))
+        fallback = str(self._fallback(section, key, ""))
         try:
             return self._parser.get(section, key, fallback=fallback)
         except Exception as e:
@@ -197,7 +202,7 @@ class Config:
                 return int(self._overrides[key])
             except (ValueError, TypeError) as e:
                 logger.debug(f"Ошибка парсинга override get_int({key}): {e}")
-        fallback = int(DEFAULT_CONFIG.get(section, {}).get(key, 0))
+        fallback = int(self._fallback(section, key, 0))
         try:
             return self._parser.getint(section, key, fallback=fallback)
         except Exception as e:
@@ -210,7 +215,7 @@ class Config:
                 return float(self._overrides[key])
             except (ValueError, TypeError) as e:
                 logger.debug(f"Ошибка парсинга override get_float({key}): {e}")
-        fallback = float(DEFAULT_CONFIG.get(section, {}).get(key, 0.0))
+        fallback = float(self._fallback(section, key, 0.0))
         try:
             return self._parser.getfloat(section, key, fallback=fallback)
         except Exception as e:
@@ -220,7 +225,7 @@ class Config:
     def get_bool(self, section: str, key: str) -> bool:
         if key in self._overrides:
             return bool(self._overrides[key])
-        fallback = bool(DEFAULT_CONFIG.get(section, {}).get(key, False))
+        fallback = bool(self._fallback(section, key, False))
         try:
             return self._parser.getboolean(section, key, fallback=fallback)
         except Exception as e:

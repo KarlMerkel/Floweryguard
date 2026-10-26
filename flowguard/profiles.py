@@ -308,8 +308,7 @@ class ProfileManager:
             return False
 
         settings = prof.get("settings", {})
-        for k, v in settings.items():
-            config.set_override(k, v)
+        config.apply_profile(settings, replace=True)
 
         with self._lock:
             self.active_profile_id = profile_id
