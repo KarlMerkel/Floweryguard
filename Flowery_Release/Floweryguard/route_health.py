@@ -55,6 +55,7 @@ class RouteHealth:
         self._clock = clock
         self._max_entries = max_entries
         self._entries = OrderedDict()
+        self._strategies = OrderedDict()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -94,6 +95,32 @@ class RouteHealth:
     def clear(self):
         with self._lock:
             self._entries.clear()
+            self._strategies.clear()
+
+    def record_strategy(self, network, host, port, strategy, outcome):
+        """Короткая подсказка для нового подключения, без штрафа общей статистики."""
+        if not host or not strategy or outcome not in ('progress', 'suspect'):
+            return
+        key = (network, host.lower().rstrip('.'), port, strategy)
+        expires = self._clock() + (300.0 if outcome == 'progress' else 45.0)
+        with self._lock:
+            self._strategies[key] = (outcome, expires)
+            self._strategies.move_to_end(key)
+            while len(self._strategies) > self._max_entries:
+                self._strategies.popitem(last=False)
+
+    def _strategy_observations(self, network, host, port, outcome):
+        scope = (network, host.lower().rstrip('.'), port)
+        now = self._clock()
+        with self._lock:
+            return [key[3] for key, (state, expires) in reversed(self._strategies.items())
+                    if key[:3] == scope and state == outcome and expires > now]
+
+    def stalled_strategies(self, network, host, port):
+        return set(self._strategy_observations(network, host, port, 'suspect'))
+
+    def progressing_strategies(self, network, host, port):
+        return self._strategy_observations(network, host, port, 'progress')
 
     def rank(self, network, host, port, candidates):
         """Стабильный порядок: передавшие данные, неизвестные, подозрительные."""

@@ -2070,12 +2070,38 @@ class DPIBypassProxy:
             return self.strategy_engine.allowed_strategy(strategy)
         return None
 
+    def _strategy_after_stall(self, host, port, ip, selected, excluded=()):
+        """После зависания пробует иную технику только для этой сети и сайта."""
+        health = getattr(self, 'route_health', None)
+        if health is None or self._fixed_strategy(host) is not None:
+            return selected
+        if self.strategy_engine.get_user_override(host):
+            return selected
+        network = getattr(self.strategy_engine, '_current_network', 'default')
+        stalled = health.stalled_strategies(network, host, port)
+        avoid = stalled | set(excluded)
+        for candidate in health.progressing_strategies(network, host, port):
+            if candidate not in avoid and self.strategy_engine.allowed_strategy(candidate) == candidate:
+                return candidate
+        if selected not in stalled:
+            return selected
+        with self._whitelist_lock:
+            whitelisted = is_host_in_whitelist(host, self.whitelist_domains)
+        alternative = self.strategy_engine.get_fallback_strategy(
+            host, failed_strategy=selected, failed_strategies=avoid, ip=ip,
+            is_youtube=is_google_or_youtube_host(host), is_discord=is_discord_host(host),
+            is_whitelisted=whitelisted, is_tspu=False)
+        alternative = self.strategy_engine.allowed_strategy(alternative)
+        logger.info('[Передача] %s:%s: после зависания %s пробуем %s', host, port, selected, alternative)
+        return alternative
+
     def _send_tls_client_hello_with_bypass(
         self,
         target_sock: socket.socket,
         data: bytes,
         target_host: str,
-        ip: Optional[str] = None
+        ip: Optional[str] = None,
+        target_port: int = 443
     ) -> Tuple[str, str]:
         """Отправляет TLS ClientHello с использованием комбинации техник DPI bypass.
         
@@ -2136,6 +2162,7 @@ class DPIBypassProxy:
             ip=ip,
             is_whitelisted=is_whitelisted
         )
+        strategy = self._strategy_after_stall(sni_name, target_port, ip, strategy)
         self._safe_execute_strategy(strategy, target_sock, data, host=sni_name)
         return strategy, sni_name
 
@@ -2173,7 +2200,7 @@ class DPIBypassProxy:
 
         # 1. Первая попытка отправки ClientHello (strat1)
         strat1, effective_host = self._send_tls_client_hello_with_bypass(
-            current_sock, first_packet, target_host, ip=current_ip
+            current_sock, first_packet, target_host, ip=current_ip, target_port=target_port
         )
         fixed_strategy = self._fixed_strategy(effective_host)
         t_send1 = time.time()
@@ -2253,6 +2280,8 @@ class DPIBypassProxy:
             strat2 = "direct"
             skip_attempt2_fast_path = False
 
+        strat2 = self._strategy_after_stall(effective_host, target_port, current_ip, strat2, (strat1,))
+
         # Попытка 2: тот же IP, альтернативная стратегия (если не пропущена через Fast-Path)
         strat2_executed = False
         if not skip_attempt2_fast_path and current_ip:
@@ -2322,6 +2351,7 @@ class DPIBypassProxy:
         )
 
         strat3 = self.strategy_engine.allowed_strategy(fixed_strategy if fixed_strategy is not None else strat3)
+        strat3 = self._strategy_after_stall(effective_host, target_port, new_ip, strat3, failed_so_far)
         t_send3 = time.time()
         if not self._safe_execute_strategy(strat3, new_sock, first_packet, host=effective_host):
             _safe_close_socket(new_sock)
@@ -2458,6 +2488,7 @@ class DPIBypassProxy:
 
         def record_progress():
             self.route_health.record(network, host, port, target_ip, 'progress')
+            self.route_health.record_strategy(network, host, port, strategy, 'progress')
             # Старое соединение не должно обучать новую сеть после смены профиля.
             if network != getattr(self.strategy_engine, '_current_network', 'default'):
                 return
@@ -2471,6 +2502,7 @@ class DPIBypassProxy:
                 return
             suspect_recorded = True
             self.route_health.record(network, host, port, target_ip, 'suspect')
+            self.route_health.record_strategy(network, host, port, strategy, 'suspect')
             logger.info(
                 '[Маршрут] %s:%s через %s: нет прогресса после %s байт (%s); '
                 'приоритет адреса временно снижен для новых соединений',
