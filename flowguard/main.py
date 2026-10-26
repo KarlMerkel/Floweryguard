@@ -559,43 +559,6 @@ class FloweryApp:
         self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
         self._timer_period_active = False
-        if sys.platform == "win32":
-            try:
-                ctypes.windll.winmm.timeBeginPeriod(1)
-                self._timer_period_active = True
-            except Exception as e:
-                logger.debug("[Main] timeBeginPeriod failed: %s", e)
-
-        # Защита от сбоев: авто-очистка брошенного системного прокси
-        if self.proxy_mgr.is_stale_proxy_present():
-            print("\033[93m[!] Обнаружен системный прокси от аварийно завершенного сеанса.\033[0m")
-            print("\033[93m[*] Выполняется автоматическая нормализация сетевых настроек Windows...\033[0m")
-            self.proxy_mgr.force_cleanup()
-
-        # Авто-восстановление DNS (Auto-Heal): автоматическое устранение зависшего нерабочего DNS от старых версий
-        if is_admin():
-            healed = self.dns_mgr.heal_stale_dns()
-            if healed:
-                print(f"\033[92m[✓] Авто-восстановление: повреждённый DNS адаптеров ({', '.join(healed)}) сброшен в DHCP.\033[0m")
-                print("    \033[92m-> Сетевое подключение Windows полностью нормализовано.\033[0m")
-            if not self.dns_mgr.test_resolution():
-                print("\033[93m[!] Системный DNS Windows не отвечает на запросы (таймаут разрешения).\033[0m")
-                print("\033[93m[*] Принудительный сброс сетевых адаптеров в DHCP...\033[0m")
-                self.dns_mgr.restore_dns(force_all=True)
-                if self.dns_mgr.test_resolution():
-                    print("\033[92m[✓] Разрешение DNS успешно восстановлено через DHCP.\033[0m")
-                else:
-                    print("\033[93m[*] Настройка резервных защищенных DNS (1.1.1.1 / 8.8.8.8)...\033[0m")
-                    self.dns_mgr.set_secure_dns()
-                    if self.dns_mgr.test_resolution():
-                        print("\033[92m[✓] Разрешение DNS успешно активировано через защищенные серверы.\033[0m")
-
-        # Автоматическая маскировка TTL тетеринга по умолчанию при старте приложения
-        if is_admin() and self.config.fix_ttl:
-            try:
-                self.ttl_mgr.apply_ttl()
-            except Exception as e:
-                logger.warning("[Main] Failed to apply TTL at startup: %s", e)
 
     def apply_setting(self, section: str, key: str, value: Any) -> None:
         """Устанавливает параметр в конфигурации и сохраняет его в config.ini (B8)."""
@@ -1471,97 +1434,56 @@ class FloweryApp:
         print(f"  - MTU/MSS Clamping: \033[93m{getattr(self.mtu_mgr, 'target_mtu', 1380)} (активно: {self.mtu_mgr._applied})\033[0m | ECH Stripping: \033[93m{'ВКЛ' if getattr(self.config, 'strip_ech', False) else 'ВЫКЛ'}\033[0m | TLS Padding: \033[93m{'ВКЛ' if getattr(self.config, 'tls_padding', False) else 'ВЫКЛ'}\033[0m")
         print()
 
-    def cleanup(self, force: bool = False) -> None:
-        """Гарантированное восстановление всех системных параметров."""
+    def cleanup(self, force: bool = False) -> bool:
+        """Останавливает фоновые задачи до отката; неудачный откат можно повторить."""
         with self._cleanup_lock:
             if self._cleaned_up:
-                return
+                return True
             if not force and not self._is_active:
-                return
-            self._cleaned_up = True
+                return False
             self._is_active = False
+            failures = []
 
-        print("\n\033[93m[*] Завершение работы Flowery, восстановление системы...\033[0m")
-        logger.info("[Main] Остановка служб Flowery и восстановление параметров системы...")
+            def attempt(label, action):
+                try:
+                    if action() is False:
+                        failures.append(label)
+                except Exception as error:
+                    failures.append(label)
+                    logger.warning("Ошибка завершения %s: %s", label, error)
 
-        # 0. КРИТИЧНО: Шаг 0 — Срочно отключаем системный прокси Windows ДО остановки сокетов!
-        # Приложения Windows (Discord, браузеры) должны немедленно переключиться на прямое соединение,
-        # пока порт 8118 еще принимает и закрывает оставшиеся запросы.
-        try:
-            print("  [*] Отключение системного прокси Windows...")
-            self.proxy_mgr.disable()
-            logger.info("[Main] SystemProxyManager: системный прокси отключен")
-        except Exception as e:
-            logger.warning("[Main] SystemProxyManager disable error: %s", e)
-
-        # 0.1. Остановка монитора питания, системного трея и монитора сети
-        try:
-            self.power_watchdog.stop()
-            logger.debug("[Main] PowerWatchdog остановлен")
-        except Exception as e:
-            logger.debug("[Main] PowerWatchdog stop error: %s", e)
-        try:
-            self.tray_icon.stop()
-            logger.debug("[Main] TrayIcon остановлен")
-        except Exception as e:
-            logger.debug("[Main] TrayIcon stop error: %s", e)
-        try:
-            self.profile_mgr.stop_network_monitor()
-            logger.debug("[Main] ProfileManager сетевой монитор остановлен")
-        except Exception as e:
-            logger.debug("[Main] ProfileManager stop error: %s", e)
-
-        # 1. Отключаем прокси сервер
-        try:
-            self.proxy_server.stop()
-            logger.info("[Main] DPIBypassProxy остановлен")
-        except Exception as e:
-            logger.debug("[Main] DPIBypassProxy stop error: %s", e)
-
-        # 1.5. Останавливаем Discord Voice UDP Helper
-        try:
-            self.voice_helper.stop()
-            logger.info("[Main] VoiceHelper остановлен")
-        except Exception as e:
-            logger.debug("[Main] VoiceHelper stop error: %s", e)
-
-        # 3. Удаляем правило блокировки QUIC
-        if is_admin() and (self.config.block_quic or self.quic_blocker._blocked or self.quic_blocker.is_rule_present()):
-            print("  [*] Удаление правила QUIC в Windows Firewall...")
-            self.quic_blocker.unblock_quic()
-            logger.info("[Main] QUICBlocker: правило блокировки UDP 443 удалено")
-
-        # 4. Восстанавливаем TTL
-        if is_admin() and (self.config.fix_ttl or self.ttl_mgr._applied):
-            print("  [*] Восстановление DefaultTTL в реестре...")
-            self.ttl_mgr.restore_ttl()
-            logger.info("[Main] TTLManager: DefaultTTL восстановлен в реестре")
-
-        # 4.1 Восстанавливаем MTU
-        if is_admin() and (getattr(self.config, "clamp_mss", True) or self.mtu_mgr._applied):
-            print("  [*] Восстановление MTU сетевых интерфейсов...")
-            self.mtu_mgr.restore_mtu()
-            logger.info("[Main] MTUManager: MTU интерфейсов восстановлен")
-
-        # 5. Восстанавливаем DNS (если меняли)
-        if self.config.enable_custom_dns or self.dns_mgr._changed_adapters:
-            self.dns_mgr.restore_dns()
-            logger.info("[Main] DNSManager: сетевые адаптеры возвращены к DHCP")
-
-        # 6. Восстанавливаем разрешение таймера Windows
-        if sys.platform == "win32" and self._timer_period_active:
-            try:
-                ctypes.windll.winmm.timeEndPeriod(1)
-                self._timer_period_active = False
-                logger.debug("[Main] timeEndPeriod(1) завершен")
-            except Exception as e:
-                logger.debug("[Main] timeEndPeriod failed: %s", e)
-
-        # 7. Освобождаем дескриптор мьютекса единого экземпляра
-        release_single_instance_mutex()
-
-        print("\033[92m[+] Все параметры системы успешно возвращены в исходное состояние.\033[0m")
-        logger.info("[Main] Восстановление системы завершено.")
+            # Восстановление после сна должно закончиться до отката реестра.
+            attempt("монитор сна", self.power_watchdog.stop)
+            attempt("монитор сети", self.profile_mgr.stop_network_monitor)
+            if self.proxy_mgr._is_active:
+                attempt("системный прокси", self.proxy_mgr.disable)
+            attempt("локальный прокси", self.proxy_server.stop)
+            attempt("голосовой помощник", self.voice_helper.stop)
+            attempt("трей", self.tray_icon.stop)
+            if self.quic_blocker._blocked:
+                attempt("QUIC", self.quic_blocker.unblock_quic)
+            if self.ttl_mgr._applied:
+                attempt("TTL", self.ttl_mgr.restore_ttl)
+            if self.mtu_mgr._applied:
+                attempt("MTU", self.mtu_mgr.restore_mtu)
+            if self.dns_mgr.has_pending_restore():
+                attempt("DNS", self.dns_mgr.restore_dns)
+            if sys.platform == "win32" and self._timer_period_active:
+                try:
+                    ctypes.windll.winmm.timeEndPeriod(1)
+                    self._timer_period_active = False
+                except Exception as error:
+                    failures.append("таймер Windows")
+                    logger.warning("Не удалось восстановить таймер: %s", error)
+            self._cleaned_up = not failures
+            if failures:
+                message = "Не завершено восстановление: " + ", ".join(failures)
+                logger.warning(message)
+                print(message + ". Повторите остановку; исходные значения сохранены.")
+            else:
+                logger.info("Службы остановлены, применённые настройки восстановлены")
+                print("[+] Службы остановлены, применённые настройки восстановлены.")
+            return self._cleaned_up
 
     def start_services(self, quiet: bool = False) -> bool:
         """Запуск полного комплекса Flowery служб без блокировки потока."""
@@ -1578,8 +1500,13 @@ class FloweryApp:
             print("    Для автоматической фиксации TTL и блокировки QUIC перезапустите start.bat от имени Администратора.\n")
 
         # 0. Монитор гибернации/сна и монитор смены сети для динамических профилей
-        self.power_watchdog.start()
-        self.profile_mgr.start_network_monitor(self.config, on_switch_callback=self._on_profile_switched)
+        if is_admin() and self.dns_mgr.has_pending_restore():
+            if not self.dns_mgr.restore_dns():
+                self._is_active = False
+                raise RuntimeError("Не удалось восстановить DNS прошлого сеанса")
+        if sys.platform == "win32" and not self._timer_period_active:
+            if ctypes.windll.winmm.timeBeginPeriod(1) == 0:
+                self._timer_period_active = True
 
         # 1. TTL Fix (применяем ДО авто-диагностики сети, чтобы статус в отчёте был актуален)
         if self.config.fix_ttl:
@@ -1671,6 +1598,8 @@ class FloweryApp:
                 print("\033[91m[!] Не удалось установить системный прокси Windows.\033[0m")
                 logger.warning("[Main] SystemProxyManager: не удалось включить системный прокси Windows")
 
+        self.power_watchdog.start()
+        self.profile_mgr.start_network_monitor(self.config, on_switch_callback=self._on_profile_switched)
         return True
 
     def stop_services(self) -> None:

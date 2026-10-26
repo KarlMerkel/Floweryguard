@@ -36,7 +36,7 @@ class TestSettingsRestore(unittest.TestCase):
         with patch('flowguard.dns_config.is_admin', return_value=True), \
              patch.object(manager, '_load_backup_file', return_value=False), \
              patch.object(manager, 'get_active_interfaces', return_value=['Ethernet']), \
-             patch('flowguard.dns_config.subprocess.run') as run, \
+             patch('flowguard.syscmd.subprocess.run') as run, \
              patch('flowguard.dns_config.os.remove'):
             self.assertTrue(manager.restore_dns())
         run.assert_not_called()

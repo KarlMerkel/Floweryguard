@@ -15,6 +15,7 @@ from flowguard.logger import get_logger
 logger = get_logger("QUIC")
 
 RULE_PREFIX = "Flowery_Block_QUIC"
+NETSH_TIMEOUT = 10.0
 KNOWN_BROWSER_KEYS = (
     "chrome", "firefox", "msedge", "yandex", "brave", "opera", "operagx", "vivaldi", "discord"
 )
@@ -172,6 +173,7 @@ class QUICBlocker:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=creationflags,
+                timeout=NETSH_TIMEOUT,
                 check=False
             )
             out_str = _decode_netsh_output(res.stdout)
@@ -185,6 +187,7 @@ class QUICBlocker:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     creationflags=creationflags,
+                    timeout=NETSH_TIMEOUT,
                     check=False
                 )
                 if res_b.returncode == 0:
@@ -233,6 +236,7 @@ class QUICBlocker:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     creationflags=creationflags,
+                    timeout=NETSH_TIMEOUT,
                     check=False
                 )
 
@@ -267,6 +271,7 @@ class QUICBlocker:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
+                timeout=NETSH_TIMEOUT,
                 check=False
             )
 
@@ -278,6 +283,7 @@ class QUICBlocker:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=creationflags,
+                    timeout=NETSH_TIMEOUT,
                     check=False
                 )
 
@@ -294,6 +300,9 @@ class QUICBlocker:
             except Exception:
                 pass
 
+            if self.is_rule_present():
+                logger.warning("Правила блокировки QUIC остались в брандмауэре после удаления")
+                return False
             self._blocked = False
             logger.info("Все правила блокировки QUIC удалены из брандмауэра")
             return True

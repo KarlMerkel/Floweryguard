@@ -4,18 +4,14 @@
 
 import os
 import sys
-import subprocess
 import socket
 import tempfile
 import json
 import threading
 from typing import Optional, List, Union
-try:
-    from Floweryguard.ttl_fix import is_admin
-    from Floweryguard.logger import get_logger
-except ImportError:
-    from flowguard.ttl_fix import is_admin
-    from flowguard.logger import get_logger
+from flowguard.ttl_fix import is_admin
+from flowguard.logger import get_logger
+from flowguard.syscmd import run_command, succeeded
 
 logger = get_logger("DNS")
 
@@ -23,6 +19,14 @@ logger = get_logger("DNS")
 VIRTUAL_ADAPTER_KEYWORDS = (
     "radmin", "hamachi", "virtual", "vmware", "vbox", "tap-", "wsl", "tailscale", "zerotier", "wireguard"
 )
+
+# Нерабочие адреса, которые прописывали прошлые версии Flowery
+LEGACY_DEAD_DNS = {"192.144.59.14", "94.232.43.149"}
+
+# Адреса, которые Flowery сам прописывает на адаптерах
+FLOWERY_DNS_SERVERS = {"1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "77.88.8.8", "9.9.9.9", "149.112.112.112"}
+
+NETSH_TIMEOUT = 10.0
 
 
 def _decode_netsh(raw_bytes: bytes) -> str:
@@ -45,7 +49,7 @@ def _decode_netsh(raw_bytes: bytes) -> str:
         try:
             txt = raw_bytes.decode(enc)
             ru_letters = sum(1 for c in txt if 'а' <= c.lower() <= 'я' or c.lower() == 'ё')
-            bad_chars = sum(1 for c in txt if c in '─│┌┐└┘├┤┬┴┼═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬█▄▌▐▀ЃҐЇў¤­ №')
+            bad_chars = sum(1 for c in txt if c in '─│┌┐└┘├┤┬┴┼═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬█▄▌▐▀ЃҐЇў¤­ №')
             candidates.append((ru_letters - bad_chars * 2, enc, txt))
         except Exception as e:
             logger.debug(f"Ошибка декодирования netsh в {enc}: {e}")
@@ -56,6 +60,10 @@ def _decode_netsh(raw_bytes: bytes) -> str:
     return raw_bytes.decode("latin1", errors="replace")
 
 
+def _flush_dns_cache() -> None:
+    run_command(["ipconfig", "/flushdns"], timeout=NETSH_TIMEOUT)
+
+
 class DNSManager:
     """Управление настройками DNS в Windows."""
 
@@ -64,6 +72,7 @@ class DNSManager:
         self.secondary_dns = secondary_dns
         self._changed_adapters: List[str] = []
         self._original_dns: dict = {}
+        self._lock = threading.RLock()
 
     @staticmethod
     def test_resolution(domain: str = "cloudflare.com", timeout: float = 0.8) -> bool:
@@ -110,15 +119,29 @@ class DNSManager:
 
     @staticmethod
     def _get_backup_filepath() -> str:
-        return os.path.join(tempfile.gettempdir(), "flowery_dns_backup.json")
+        # FLOWERY_HOME изолирует снимок (тесты, портативный запуск) от системного каталога TEMP
+        base = os.environ.get("FLOWERY_HOME") or tempfile.gettempdir()
+        os.makedirs(base, exist_ok=True)
+        return os.path.join(base, "flowery_dns_backup.json")
 
-    def _save_backup_file(self) -> None:
+    def _save_backup_file(self) -> bool:
+        """Атомарно записывает снимок исходных DNS. Пустой снимок удаляет файл."""
+        path = self._get_backup_filepath()
         try:
-            with open(self._get_backup_filepath(), "w", encoding="utf-8") as f:
+            if not self._changed_adapters:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.debug(f"Файл бэкапа DNS удален: {path}")
+                return True
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"original": self._original_dns, "changed": self._changed_adapters}, f)
-            logger.debug(f"DNS backup сохранен в {self._get_backup_filepath()}")
+            os.replace(tmp, path)
+            logger.debug(f"DNS backup сохранен в {path}")
+            return True
         except Exception as e:
-            logger.debug(f"Ошибка сохранения DNS backup: {e}")
+            logger.warning(f"Ошибка сохранения DNS backup: {e}")
+            return False
 
     def _load_backup_file(self) -> bool:
         p = self._get_backup_filepath()
@@ -130,7 +153,8 @@ class DNSManager:
                         orig = data.get("original", {})
                         changed = data.get("changed", [])
                         if isinstance(orig, dict) and orig:
-                            self._original_dns.update(orig)
+                            for iface, value in orig.items():
+                                self._original_dns.setdefault(iface, value)
                         if isinstance(changed, list) and changed:
                             for c in changed:
                                 if c not in self._changed_adapters:
@@ -141,23 +165,21 @@ class DNSManager:
                 logger.debug(f"Ошибка чтения DNS backup {p}: {e}")
         return False
 
+    def has_pending_restore(self) -> bool:
+        """Есть ли изменения DNS (в памяти или от прошлого сеанса), ожидающие отката."""
+        return bool(self._changed_adapters) or os.path.exists(self._get_backup_filepath())
+
     def get_active_interfaces(self) -> List[str]:
         """Получает имена активных физических сетевых интерфейсов (исключая VPN и виртуальные)."""
         interfaces = []
+        res = run_command(["netsh", "interface", "show", "interface"], timeout=NETSH_TIMEOUT, capture=True)
+        if not succeeded(res):
+            return interfaces
         try:
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-            res = subprocess.run(
-                ["netsh", "interface", "show", "interface"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=creationflags,
-                check=False
-            )
             out_str = _decode_netsh(res.stdout)
             for line in out_str.splitlines():
-                line_lower = line.lower()
-                if "connected" in line_lower or "подключен" in line_lower:
-                    parts = line.split()
+                parts = line.split()
+                if len(parts) >= 4 and parts[1].lower() in ("connected", "подключен", "подключён"):
                     if len(parts) >= 4:
                         iface_name = " ".join(parts[3:])
                         if any(k in iface_name.lower() for k in VIRTUAL_ADAPTER_KEYWORDS):
@@ -207,29 +229,28 @@ class DNSManager:
             logger.debug(f"Ошибка доступа к ветке Network в реестре: {e}")
         return None
 
-    def _backup_dns(self, iface: str, creationflags: int) -> None:
+    def _backup_dns(self, iface: str, creationflags: int = 0) -> bool:
         """Считывает и сохраняет текущие DNS настройки адаптера перед их заменой.
         Корректно определяет статику и DHCP на любых языковых версиях Windows (RU/EN).
+        Возвращает False, если исходное состояние определить не удалось.
         """
         if iface in self._original_dns:
-            return
+            return True
 
         # 1. Первичный метод: прямое чтение реестра Windows (мгновенно и не зависит от языка консоли)
         reg_result = self._get_adapter_dns_registry(iface)
         if reg_result is not None:
             self._original_dns[iface] = reg_result
             logger.info(f"Бэкап DNS (реестр) для '{iface}': {reg_result}")
-            return
+            return True
 
         # 2. Резервный метод: мультиязычный парсер вывода netsh
+        res = run_command(["netsh", "interface", "ipv4", "show", "dns", f"name={iface}"],
+                          timeout=NETSH_TIMEOUT, capture=True)
+        if not succeeded(res):
+            logger.warning(f"Не удалось прочитать исходный DNS адаптера '{iface}', изменение пропущено")
+            return False
         try:
-            res = subprocess.run(
-                ["netsh", "interface", "ipv4", "show", "dns", f"name={iface}"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=creationflags,
-                check=False
-            )
             out_str = _decode_netsh(res.stdout)
             import re
 
@@ -249,14 +270,12 @@ class DNSManager:
                         if ip not in static_ips and not ip.startswith("255.") and not ip.startswith("0."):
                             static_ips.append(ip)
 
-            if static_ips:
-                self._original_dns[iface] = static_ips
-            else:
-                self._original_dns[iface] = "dhcp"
+            self._original_dns[iface] = static_ips if static_ips else "dhcp"
             logger.info(f"Бэкап DNS (netsh) для '{iface}': {self._original_dns[iface]}")
+            return True
         except Exception as e:
-            logger.debug(f"Ошибка бэкапа DNS через netsh для '{iface}': {e}")
-            self._original_dns[iface] = "dhcp"
+            logger.warning(f"Ошибка бэкапа DNS через netsh для '{iface}': {e}")
+            return False
 
     def set_secure_dns(self) -> bool:
         """Настраивает защищенные DNS на подключенных интерфейсах с предварительной проверкой доступности."""
@@ -281,179 +300,143 @@ class DNSManager:
                 logger.warning(f"DNS сервер {self.primary_dns} не отвечает на UDP 53. Системные DNS оставлены без изменений.")
                 return False
 
-        interfaces = self.get_active_interfaces()
-        success = False
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        with self._lock:
+            interfaces = self.get_active_interfaces()
+            success = False
 
-        logger.info(f"Установка защищённых DNS ({effective_primary} / {effective_secondary}) на адаптерах: {interfaces}")
+            logger.info(f"Установка защищённых DNS ({effective_primary} / {effective_secondary}) на адаптерах: {interfaces}")
 
-        for iface in interfaces:
-            try:
-                self._backup_dns(iface, creationflags)
-                res1 = subprocess.run(
-                    ["netsh", "interface", "ipv4", "set", "dns", f"name={iface}", "static", effective_primary],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                    check=False
-                )
-                logger.info(f"netsh set dns '{iface}' static {effective_primary}: exit_code={res1.returncode}")
-                if effective_secondary:
-                    res2 = subprocess.run(
-                        ["netsh", "interface", "ipv4", "add", "dns", f"name={iface}", effective_secondary, "index=2"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=creationflags,
-                        check=False
-                    )
-                    logger.info(f"netsh add dns '{iface}' {effective_secondary}: exit_code={res2.returncode}")
-                if iface not in self._changed_adapters:
+            for iface in interfaces:
+                if not self._backup_dns(iface):
+                    continue
+                newly_changed = iface not in self._changed_adapters
+                if newly_changed:
+                    # Снимок записывается до изменения: аварийное завершение не теряет исходный DNS
                     self._changed_adapters.append(iface)
+                    if not self._save_backup_file():
+                        self._changed_adapters.remove(iface)
+                        self._original_dns.pop(iface, None)
+                        continue
+
+                # validate=no: проверка сервера средствами netsh может занимать десятки секунд
+                res1 = run_command(
+                    ["netsh", "interface", "ipv4", "set", "dns", f"name={iface}", "static",
+                     effective_primary, "validate=no"],
+                    timeout=NETSH_TIMEOUT,
+                )
+                logger.info(f"netsh set dns '{iface}' static {effective_primary}: "
+                            f"exit_code={res1.returncode if res1 is not None else 'timeout'}")
+                if res1 is not None and res1.returncode != 0:
+                    # Даже ошибка может последовать после частичного изменения.
+                    continue
+                if res1 is None:
+                    # Результат неизвестен: адаптер остаётся в списке для отката
+                    continue
+
+                if effective_secondary:
+                    res2 = run_command(
+                        ["netsh", "interface", "ipv4", "add", "dns", f"name={iface}", effective_secondary,
+                         "index=2", "validate=no"],
+                        timeout=NETSH_TIMEOUT,
+                    )
+                    logger.info(f"netsh add dns '{iface}' {effective_secondary}: "
+                                f"exit_code={res2.returncode if res2 is not None else 'timeout'}")
                 success = True
-            except Exception as e:
-                logger.error(f"Ошибка установки DNS на интерфейсе '{iface}': {e}")
 
-        if success:
-            self._save_backup_file()
-            subprocess.run(["ipconfig", "/flushdns"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False)
-            logger.info("ipconfig /flushdns выполнен после установки DNS")
+            if success:
+                _flush_dns_cache()
+                logger.info("ipconfig /flushdns выполнен после установки DNS")
 
-        return success
+            return success
+
+    def _restore_adapter(self, iface: str, orig) -> bool:
+        if orig == "dhcp" or not isinstance(orig, list) or not orig:
+            res = run_command(["netsh", "interface", "ipv4", "set", "dns", f"name={iface}", "dhcp"],
+                              timeout=NETSH_TIMEOUT)
+            logger.info(f"Восстановлен DNS (DHCP) для '{iface}': "
+                        f"exit_code={res.returncode if res is not None else 'timeout'}")
+            return succeeded(res)
+
+        # Восстанавливаем сохранённые статические адреса пользователя
+        res = run_command(["netsh", "interface", "ipv4", "set", "dns", f"name={iface}", "static",
+                           orig[0], "validate=no"], timeout=NETSH_TIMEOUT)
+        logger.info(f"Восстановлен статический DNS {orig[0]} для '{iface}': "
+                    f"exit_code={res.returncode if res is not None else 'timeout'}")
+        if not succeeded(res):
+            return False
+        for i, extra_ip in enumerate(orig[1:]):
+            extra = run_command(["netsh", "interface", "ipv4", "add", "dns", f"name={iface}", extra_ip,
+                                 f"index={i+2}", "validate=no"], timeout=NETSH_TIMEOUT)
+            if not succeeded(extra):
+                logger.warning(f"Не удалось вернуть дополнительный DNS {extra_ip} для '{iface}'")
+                return False
+        return True
 
     def restore_dns(self, force_all: bool = False) -> bool:
-        """Восстанавливает исходные настройки DNS (DHCP или статические IP пользователя)."""
+        """Восстанавливает исходные настройки DNS (DHCP или статические IP пользователя).
+
+        Снимок адаптера удаляется только после подтверждённого отката, поэтому
+        неудачное восстановление можно повторить. Возвращает True, если все
+        адаптеры восстановлены.
+        """
         if not is_admin():
             logger.debug("restore_dns: пропуск (нет прав администратора)")
             return False
 
-        if not self._changed_adapters:
+        with self._lock:
             self._load_backup_file()
+            adapters_to_restore = list(self._changed_adapters)
 
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        adapters_to_restore = list(self._changed_adapters)
+            if not adapters_to_restore and not force_all:
+                return True
 
-        if not adapters_to_restore and not force_all:
-            return True
+            # Принудительный сброс (явная команда --clean / stop.bat): остальные адаптеры — в DHCP
+            if force_all:
+                for iface in self.get_active_interfaces():
+                    if iface not in adapters_to_restore:
+                        adapters_to_restore.append(iface)
 
-        # Если запрошен принудительный сброс (например при --clean / stop.bat) или список пуст
-        if force_all:
-            for iface in self.get_active_interfaces():
-                if iface not in adapters_to_restore:
-                    adapters_to_restore.append(iface)
+            logger.info(f"Восстановление DNS для адаптеров: {adapters_to_restore}")
 
-        logger.info(f"Восстановление DNS для адаптеров: {adapters_to_restore}")
+            all_ok = True
+            for iface in adapters_to_restore:
+                tracked = iface in self._changed_adapters
+                orig = self._original_dns.get(iface, "dhcp")
+                try:
+                    ok = self._restore_adapter(iface, orig)
+                except Exception as e:
+                    logger.error(f"Ошибка восстановления DNS для '{iface}': {e}")
+                    ok = False
+                if ok and tracked:
+                    self._changed_adapters.remove(iface)
+                    self._original_dns.pop(iface, None)
+                elif not ok:
+                    all_ok = False
+                    logger.warning(f"DNS адаптера '{iface}' не восстановлен; снимок сохранён для повторной попытки")
 
-        for iface in adapters_to_restore:
-            orig = self._original_dns.get(iface, "dhcp")
-            try:
-                if orig == "dhcp" or not isinstance(orig, list) or not orig:
-                    res = subprocess.run(
-                        ["netsh", "interface", "ipv4", "set", "dns", f"name={iface}", "dhcp"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=creationflags,
-                        check=False
-                    )
-                    logger.info(f"Восстановлен DNS (DHCP) для '{iface}': exit_code={res.returncode}")
-                else:
-                    # Восстанавливаем сохранённые статические адреса пользователя
-                    res = subprocess.run(
-                        ["netsh", "interface", "ipv4", "set", "dns", f"name={iface}", "static", orig[0]],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=creationflags,
-                        check=False
-                    )
-                    logger.info(f"Восстановлен статический DNS {orig[0]} для '{iface}': exit_code={res.returncode}")
-                    for i, extra_ip in enumerate(orig[1:]):
-                        subprocess.run(
-                            ["netsh", "interface", "ipv4", "add", "dns", f"name={iface}", extra_ip, f"index={i+2}"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            creationflags=creationflags,
-                            check=False
-                        )
-            except Exception as e:
-                logger.error(f"Ошибка восстановления DNS для '{iface}': {e}")
-
-        self._changed_adapters.clear()
-        self._original_dns.clear()
-        try:
-            p = self._get_backup_filepath()
-            if os.path.exists(p):
-                os.remove(p)
-                logger.debug(f"Файл бэкапа DNS удален: {p}")
-        except Exception as e:
-            logger.debug(f"Ошибка удаления файла бэкапа DNS: {e}")
-
-        subprocess.run(["ipconfig", "/flushdns"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False)
-        return True
+            all_ok = self._save_backup_file() and all_ok
+            _flush_dns_cache()
+            return all_ok
 
     def heal_stale_dns(self) -> List[str]:
-        """Автоматическое самовосстановление DNS при старте (Zero-Config / Auto-Heal).
-        Если с прошлого аварийного сеанса остался мертвый статический DNS (например, 192.144.59.14)
-        или если текущие статические DNS адаптера не отвечают на запросы —
-        автоматически сбрасывает настройки адаптера в DHCP и сбрасывает локальный кэш Windows.
+        """Самовосстановление DNS при старте после аварийного завершения прошлого сеанса.
+
+        1. Если остался снимок прошлого сеанса — возвращает исходные настройки пользователя.
+        2. Нерабочие статические DNS сбрасываются в DHCP, только если их прописал Flowery
+           (адреса прошлых версий или стандартные резолверы Flowery). Собственные
+           настройки пользователя не трогаются, даже если сервер сейчас не отвечает.
         Возвращает список восстановленных интерфейсов.
         """
         if not is_admin() or sys.platform != "win32":
             return []
 
-        # Обеспечиваем включенное состояние активного зондирования Windows NCSI
-        try:
-            import winreg
-            ncsi_key = r"SYSTEM\CurrentControlSet\Services\NlaSvc\Parameters\Internet"
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, ncsi_key, 0, winreg.KEY_SET_VALUE) as key:
-                winreg.SetValueEx(key, "EnableActiveProbing", 0, winreg.REG_DWORD, 1)
-            logger.debug("EnableActiveProbing установлен в 1")
-        except Exception as e:
-            logger.debug(f"Ошибка записи EnableActiveProbing в реестре: {e}")
-
-        healed_interfaces = []
-        interfaces = self.get_active_interfaces()
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-
-        # Список известных нерабочих адресов прошлых версий и зависших локальных заглушек
-        KNOWN_DEAD_DNS = {"192.144.59.14", "94.232.43.149", "127.0.0.1", "127.0.0.53"}
-
-        for iface in interfaces:
-            current_dns = self._get_adapter_dns_registry(iface)
-            need_reset = False
-
-            if isinstance(current_dns, list) and current_dns:
-                # 1. Если прописаны известные нерабочие адреса
-                if any(ip in KNOWN_DEAD_DNS for ip in current_dns):
-                    need_reset = True
-                    logger.warning(f"На интерфейсе '{iface}' обнаружен устаревший мертвый DNS: {current_dns}")
-                else:
-                    # 2. Проверяем, отвечает ли хоть один из прописанных статических серверов
-                    any_alive = any(self.test_dns_server(ip, timeout=0.8) for ip in current_dns)
-                    if not any_alive:
-                        need_reset = True
-                        logger.warning(f"На интерфейсе '{iface}' статические DNS {current_dns} не отвечают")
-
-            if need_reset:
-                try:
-                    res = subprocess.run(
-                        ["netsh", "interface", "ipv4", "set", "dns", f"name={iface}", "dhcp"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=creationflags,
-                        check=False
-                    )
-                    healed_interfaces.append(iface)
-                    logger.info(f"Сброшен в DHCP проблемный DNS интерфейса '{iface}': exit_code={res.returncode}")
-                except Exception as e:
-                    logger.error(f"Ошибка сброса DNS в DHCP для '{iface}': {e}")
-
-        if healed_interfaces:
-            subprocess.run(["ipconfig", "/flushdns"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False)
-            try:
-                p = self._get_backup_filepath()
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception as e:
-                logger.debug(f"Ошибка удаления файла бэкапа: {e}")
+        healed_interfaces: List[str] = []
+        with self._lock:
+            if os.path.exists(self._get_backup_filepath()):
+                self._load_backup_file()
+                pending = list(self._changed_adapters)
+                logger.warning(f"Найден снимок DNS прошлого сеанса, восстановление адаптеров: {pending}")
+                self.restore_dns()
+                healed_interfaces.extend(i for i in pending if i not in self._changed_adapters)
 
         return healed_interfaces
-

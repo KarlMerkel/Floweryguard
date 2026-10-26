@@ -42,6 +42,8 @@ class PowerWatchdog:
         self.is_running = False
         self._thread: Optional[threading.Thread] = None
         self._recovery_lock = threading.Lock()
+        self._operation_lock = threading.RLock()
+        self._stop_event = threading.Event()
         self._last_recovery_time = 0.0
         self._recovery_cooldown = 3.0  # Защита от дребезга при множественных событиях
 
@@ -56,6 +58,7 @@ class PowerWatchdog:
         """Запускает фоновый сторожевой поток мониторинга питания и сетевого стека."""
         if self.is_running:
             return
+        self._stop_event.clear()
         self.is_running = True
         self._start_time = time.time()
         self._last_wall_time = time.time()
@@ -71,6 +74,9 @@ class PowerWatchdog:
     def stop(self) -> None:
         """Останавливает сторожевой поток."""
         self.is_running = False
+        self._stop_event.set()
+        with self._operation_lock:
+            logger.debug("Текущие операции восстановления завершены")
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self._thread = None
@@ -100,6 +106,8 @@ class PowerWatchdog:
         """Инициирует процесс полного восстановления всех компонентов Flowery.
         Имеет встроенную защиту от дребезга (debounce cooldown).
         """
+        if self._stop_event.is_set():
+            return False
         now = time.time()
         with self._recovery_lock:
             if now - self._last_recovery_time < self._recovery_cooldown:
@@ -122,11 +130,17 @@ class PowerWatchdog:
 
     def _execute_recovery_sequence(self, reason: str) -> None:
         """Последовательность гарантированного оживления всех компонентов."""
+        with self._operation_lock:
+            if self._stop_event.is_set():
+                return
+            self._recover(reason)
+
+    def _recover(self, reason: str) -> None:
         try:
             # 1. Даем сетевому стеку Windows 1.2 секунды на восстановление DHCP и физического линка Wi-Fi
             time.sleep(1.2)
 
-            if not getattr(self.app, "_is_active", False):
+            if self._stop_event.is_set() or not getattr(self.app, "_is_active", False):
                 logger.info("[PowerWatchdog] Flowery в данный момент остановлен пользователем, пропуск восстановления.")
                 return
 
@@ -149,6 +163,8 @@ class PowerWatchdog:
                 print("  \033[92m[✓]\033[0m Слушающий сокет прокси в норме, кэши устаревших IP очищены")
 
             # 3. Восстановление системного прокси Windows (WinINet / Internet Settings)
+            if self._stop_event.is_set() or not getattr(self.app, "_is_active", False):
+                return
             if hasattr(self.app, "proxy_mgr") and self.app.proxy_mgr:
                 pm = self.app.proxy_mgr
                 cfg = getattr(self.app, "config", None)
@@ -194,6 +210,7 @@ class PowerWatchdog:
                         prof_name, fp = self.app.profile_mgr.auto_detect_and_apply(cfg)
                         self.app.active_profile_name = prof_name
                         self.app.current_network_fp = fp
+                        self.app.proxy_server.strategy_engine.set_network_context(fp)
                         if hasattr(self.app, "tray_icon") and self.app.tray_icon:
                             self.app.tray_icon.update_tooltip(f"Flowery (Glue) — {prof_name}")
                         print(f"  \033[92m[✓]\033[0m Сетевой профиль: '{prof_name}' ({fp})")
@@ -312,4 +329,6 @@ class PowerWatchdog:
                                     f"(Реестр: ProxyEnable={en}, ProxyServer='{srv}'; ожидалось: ProxyEnable=1, ProxyServer='{target_srv}') "
                                     f"Восстановление..."
                                 )
-                                self.app.proxy_mgr.ensure_active()
+                                with self._operation_lock:
+                                    if not self._stop_event.is_set() and self.app._is_active:
+                                        self.app.proxy_mgr.ensure_active()

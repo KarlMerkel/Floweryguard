@@ -25,6 +25,8 @@ class TestDiscordWinwsCoexistence(unittest.TestCase):
         app = FloweryApp()
         app._is_active = True
         app._cleaned_up = False
+        app.proxy_mgr._is_active = True
+        app.dns_mgr.has_pending_restore = MagicMock(return_value=False)
 
         order = []
         app.proxy_mgr.disable = MagicMock(side_effect=lambda **kw: order.append("proxy_disable"))

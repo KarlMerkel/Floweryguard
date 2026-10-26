@@ -5,7 +5,7 @@
 import sys
 import os
 import ctypes
-import subprocess
+import subprocess  # noqa: F401 — точка подмены в тестах
 import winreg
 from typing import Optional, Tuple, List, Dict
 
@@ -13,6 +13,7 @@ try:
     from Floweryguard.logger import get_logger
 except ImportError:
     from flowguard.logger import get_logger
+from flowguard.syscmd import run_command, succeeded
 
 logger = get_logger("TTL")
 
@@ -156,15 +157,8 @@ class TTLManager:
                 logger.debug(f"Ошибка записи IPv6 DefaultTTL: {e}")
 
             if self.enable_timestamps:
-                creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                res = subprocess.run(
-                    ["netsh", "interface", "tcp", "set", "global", "timestamps=enabled"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                    check=False
-                )
-                logger.info(f"Включение TCP Timestamps: exit_code={res.returncode}")
+                res = run_command(["netsh", "interface", "tcp", "set", "global", "timestamps=enabled"])
+                logger.info(f"Включение TCP Timestamps: exit_code={res.returncode if res is not None else 'timeout'}")
 
             self._applied = True
             return True
@@ -266,14 +260,8 @@ class MTUManager:
             return interfaces
 
         try:
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-            proc = subprocess.run(
-                ["netsh", "interface", "ipv4", "show", "subinterfaces"],
-                capture_output=True,
-                creationflags=creationflags,
-                check=False
-            )
-            raw = proc.stdout or b""
+            proc = run_command(["netsh", "interface", "ipv4", "show", "subinterfaces"], capture=True)
+            raw = (proc.stdout if proc is not None else b"") or b""
             text_out = _decode_netsh(raw)
 
             for line in text_out.splitlines():
@@ -302,14 +290,8 @@ class MTUManager:
         if sys.platform != "win32":
             return None
         try:
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-            proc = subprocess.run(
-                ["netsh", "interface", "ipv6", "show", "subinterfaces"],
-                capture_output=True,
-                creationflags=creationflags,
-                check=False
-            )
-            raw = proc.stdout or b""
+            proc = run_command(["netsh", "interface", "ipv6", "show", "subinterfaces"], capture=True)
+            raw = (proc.stdout if proc is not None else b"") or b""
             text_out = _decode_netsh(raw)
             for line in text_out.splitlines():
                 parts = line.strip().split(maxsplit=4)
@@ -325,17 +307,11 @@ class MTUManager:
             return []
 
         default_names: List[str] = []
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
         # Способ 1: через netsh interface ipv4 show route (префикс 0.0.0.0/0) + netsh show interfaces (индекс -> имя)
         try:
-            proc_route = subprocess.run(
-                ["netsh", "interface", "ipv4", "show", "route"],
-                capture_output=True,
-                creationflags=creationflags,
-                check=False
-            )
-            route_text = _decode_netsh(proc_route.stdout or b"")
+            proc_route = run_command(["netsh", "interface", "ipv4", "show", "route"], capture=True)
+            route_text = _decode_netsh((proc_route.stdout if proc_route is not None else b"") or b"")
             default_idxs = set()
             for line in route_text.splitlines():
                 parts = line.split()
@@ -347,13 +323,8 @@ class MTUManager:
                         pass
 
             if default_idxs:
-                proc_ifaces = subprocess.run(
-                    ["netsh", "interface", "ipv4", "show", "interfaces"],
-                    capture_output=True,
-                    creationflags=creationflags,
-                    check=False
-                )
-                iface_text = _decode_netsh(proc_ifaces.stdout or b"")
+                proc_ifaces = run_command(["netsh", "interface", "ipv4", "show", "interfaces"], capture=True)
+                iface_text = _decode_netsh((proc_ifaces.stdout if proc_ifaces is not None else b"") or b"")
                 for line in iface_text.splitlines():
                     parts = line.split(maxsplit=4)
                     if len(parts) >= 5 and parts[0] in default_idxs:
@@ -378,13 +349,8 @@ class MTUManager:
                 s.close()
 
             if local_ip and local_ip != "127.0.0.1":
-                proc_ips = subprocess.run(
-                    ["netsh", "interface", "ipv4", "show", "ipaddresses"],
-                    capture_output=True,
-                    creationflags=creationflags,
-                    check=False
-                )
-                ips_text = _decode_netsh(proc_ips.stdout or b"")
+                proc_ips = run_command(["netsh", "interface", "ipv4", "show", "ipaddresses"], capture=True)
+                ips_text = _decode_netsh((proc_ips.stdout if proc_ips is not None else b"") or b"")
                 current_iface = None
                 for line in ips_text.splitlines():
                     line_s = line.strip()
@@ -420,7 +386,6 @@ class MTUManager:
         default_gateways = set(self.get_default_gateway_interfaces())
         logger.info(f"MTUManager: Обнаружены основные интерфейсы шлюза по умолчанию: {default_gateways}")
 
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         success = False
         for name, current_mtu in active:
             n_low = name.lower()
@@ -451,23 +416,26 @@ class MTUManager:
             needs_v6 = (orig_v6 is not None and orig_v6 != self.target_mtu)
 
             if needs_v4 or needs_v6:
+                known = name in self.original_mtus
                 self.original_mtus.setdefault(name, current_mtu)
                 if orig_v6 is not None:
                     self.original_mtus_v6.setdefault(name, orig_v6)
                 cmd_v4 = ["netsh", "interface", "ipv4", "set", "subinterface", name, f"mtu={self.target_mtu}", "store=active"]
                 cmd_v6 = ["netsh", "interface", "ipv6", "set", "subinterface", name, f"mtu={self.target_mtu}", "store=active"]
-                try:
-                    res_v4 = subprocess.run(cmd_v4, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False)
-                    res_v6 = subprocess.run(cmd_v6, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False)
-                    if res_v4.returncode == 0 or res_v6.returncode == 0:
-                        success = True
-                        logger.info(f"Установлен MTU={self.target_mtu} (IPv4/IPv6) для интерфейса '{name}' (было: v4={current_mtu}, v6={orig_v6})")
-                    else:
-                        logger.warning(f"Ошибка netsh set MTU для '{name}': exit_v4={res_v4.returncode}, exit_v6={res_v6.returncode}")
-                except Exception as e:
-                    logger.error(f"Исключение при установке MTU для '{name}': {e}")
+                res_v4 = run_command(cmd_v4)
+                res_v6 = run_command(cmd_v6) if orig_v6 is not None else None
+                if succeeded(res_v4) or succeeded(res_v6):
+                    success = True
+                    logger.info(f"Установлен MTU={self.target_mtu} (IPv4/IPv6) для интерфейса '{name}' (было: v4={current_mtu}, v6={orig_v6})")
+                else:
+                    logger.warning(f"Ошибка netsh set MTU для '{name}': "
+                                   f"exit_v4={getattr(res_v4, 'returncode', 'timeout')}, exit_v6={getattr(res_v6, 'returncode', None)}")
+                    # Явный отказ обеих команд: интерфейс не менялся, снимок не нужен
+                    if not known and res_v4 is not None and (orig_v6 is None or res_v6 is not None):
+                        self.original_mtus.pop(name, None)
+                        self.original_mtus_v6.pop(name, None)
 
-        self._applied = self._applied or success
+        self._applied = bool(self.original_mtus)
         return success
 
     def restore_mtu(self) -> bool:
@@ -476,24 +444,22 @@ class MTUManager:
             logger.debug("restore_mtu: пропуск (не было применено или нет прав админа)")
             return False
 
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        restored = False
+        all_ok = True
         for name, orig_mtu in list(self.original_mtus.items()):
-            orig_v6 = self.original_mtus_v6.get(name, orig_mtu)
+            orig_v6 = self.original_mtus_v6.get(name)
             cmd_v4 = ["netsh", "interface", "ipv4", "set", "subinterface", name, f"mtu={orig_mtu}", "store=active"]
-            cmd_v6 = ["netsh", "interface", "ipv6", "set", "subinterface", name, f"mtu={orig_v6}", "store=active"]
-            try:
-                res_v4 = subprocess.run(cmd_v4, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False)
-                res_v6 = subprocess.run(cmd_v6, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False)
-                if res_v4.returncode == 0 or res_v6.returncode == 0:
-                    restored = True
-                    logger.info(f"Восстановлен MTU v4={orig_mtu}, v6={orig_v6} для интерфейса '{name}'")
-                else:
-                    logger.warning(f"Ошибка netsh restore MTU для '{name}': exit_v4={res_v4.returncode}, exit_v6={res_v6.returncode}")
-            except Exception as e:
-                logger.error(f"Исключение при восстановлении MTU для '{name}': {e}")
+            ok = succeeded(run_command(cmd_v4))
+            if orig_v6 is not None:
+                cmd_v6 = ["netsh", "interface", "ipv6", "set", "subinterface", name, f"mtu={orig_v6}", "store=active"]
+                ok = succeeded(run_command(cmd_v6)) and ok
+            if ok:
+                # Снимок удаляется только после подтверждённого отката
+                self.original_mtus.pop(name, None)
+                self.original_mtus_v6.pop(name, None)
+                logger.info(f"Восстановлен MTU v4={orig_mtu}, v6={orig_v6} для интерфейса '{name}'")
+            else:
+                all_ok = False
+                logger.warning(f"MTU интерфейса '{name}' не восстановлен; снимок сохранён для повторной попытки")
 
-        self.original_mtus.clear()
-        self.original_mtus_v6.clear()
-        self._applied = False
-        return restored
+        self._applied = bool(self.original_mtus)
+        return all_ok

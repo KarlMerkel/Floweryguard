@@ -17,6 +17,21 @@ def run_worker(integration, pattern):
     blocked = []
 
     def audit(event, args):
+        if event in ('winreg.SetValue', 'winreg.DeleteValue', 'winreg.DeleteKey', 'winreg.CreateKey'):
+            message = f"Запись реестра в автономном тесте: {event}"
+            blocked.append(message)
+            raise OSError(message)
+        if event == 'subprocess.Popen':
+            command = args[1]
+            words = [str(word).lower() for word in command] if isinstance(command, (list, tuple)) else str(command).lower().split()
+            executable = Path(str(args[0])).name.lower()
+            mutating = (executable in ('taskkill', 'taskkill.exe') or
+                        executable in ('netsh', 'netsh.exe', 'reg', 'reg.exe', 'sc', 'sc.exe') and
+                        bool(set(words) & {'set', 'add', 'delete', 'stop', 'start'}))
+            if mutating:
+                message = f"Системная запись без подмены в тесте: {executable}"
+                blocked.append(message)
+                raise OSError(message)
         dns_events = ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr")
         if event not in ("socket.connect", "socket.sendto") + dns_events:
             return

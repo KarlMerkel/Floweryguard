@@ -5,11 +5,20 @@
 """
 
 import unittest
+import tempfile
+import os
 from unittest.mock import patch, MagicMock
 from Floweryguard.dns_config import DNSManager, VIRTUAL_ADAPTER_KEYWORDS
 
 
 class TestDNSManagerSafety(unittest.TestCase):
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        backup = patch.object(DNSManager, '_get_backup_filepath', return_value=os.path.join(directory.name, 'dns.json'))
+        backup.start()
+        self.addCleanup(backup.stop)
 
     def test_virtual_adapter_keywords_defined(self):
         self.assertIn("radmin", VIRTUAL_ADAPTER_KEYWORDS)
@@ -69,19 +78,15 @@ class TestDNSManagerSafety(unittest.TestCase):
                 mock_run.assert_not_called()
 
     @patch("Floweryguard.dns_config.is_admin", return_value=True)
-    def test_heal_stale_dns_resets_dead_ip(self, mock_admin):
+    def test_heal_stale_dns_does_not_reset_unowned_settings(self, mock_admin):
         mgr = DNSManager()
         with patch.object(mgr, "get_active_interfaces", return_value=["Wi-Fi"]):
             # Имитируем, что на Wi-Fi прописан старый мертвый DNS 192.144.59.14
             with patch.object(mgr, "_get_adapter_dns_registry", return_value=["192.144.59.14"]):
                 with patch("subprocess.run") as mock_run:
                     healed = mgr.heal_stale_dns()
-                    self.assertIn("Wi-Fi", healed)
-                    # Проверяем, что netsh вызван для сброса в dhcp
-                    reset_called = any(
-                        "dhcp" in str(call.args[0]) for call in mock_run.call_args_list if call.args
-                    )
-                    self.assertTrue(reset_called)
+                    self.assertEqual(healed, [])
+                    mock_run.assert_not_called()
 
 
 if __name__ == "__main__":
