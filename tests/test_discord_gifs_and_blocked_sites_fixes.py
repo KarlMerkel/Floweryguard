@@ -32,13 +32,9 @@ class TestDiscordGifsAndBlockedSitesFixes(unittest.TestCase):
         for h in tenor_hosts + giphy_hosts:
             self.assertTrue(is_discord_media_host(h), f"Host {h} must be recognized as discord media")
 
-    def test_is_bogon_or_sinkhole_ip_filters_isp_subnets(self):
-        """Проверяет фильтрацию провайдерских sinkhole-сетей и приватных диапазонов."""
+    def test_is_bogon_or_sinkhole_ip_keeps_public_routes(self):
+        """Частные диапазоны фильтруются, публичные адреса проверяются соединением."""
         sinkhole_ips = [
-            "8.47.69.1",
-            "8.47.69.254",
-            "8.6.112.1",
-            "8.6.112.50",
             "10.0.0.1",
             "10.200.1.5",
             "192.168.1.1",
@@ -54,6 +50,10 @@ class TestDiscordGifsAndBlockedSitesFixes(unittest.TestCase):
             self.assertTrue(is_bogon_or_sinkhole_ip(ip), f"IP {ip} must be detected as bogon/sinkhole")
 
         clean_ips = [
+            "8.47.69.1",
+            "8.47.69.254",
+            "8.6.112.1",
+            "8.6.112.50",
             "104.21.5.1",
             "162.159.136.232",
             "142.250.74.110",

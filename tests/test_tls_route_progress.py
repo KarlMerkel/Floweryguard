@@ -21,7 +21,8 @@ class TestTlsRouteProgress(unittest.TestCase):
         self.proxy.strategy_engine._current_network = 'wifi'
         self.proxy.route_health = RouteHealth()
 
-    def run_flow(self, size, end_time=16, host='surfshark.com', client_error=False, route_network=None):
+    def run_flow(self, size, end_time=16, host='surfshark.com', client_error=False, route_network=None,
+                 strategy='combo_tlsrec_tcpsplit'):
         client, upstream = MagicMock(spec=socket.socket), MagicMock(spec=socket.socket)
         ip = '104.18.120.10'
         _set_socket_meta(upstream, ip, 0.02)
@@ -47,7 +48,7 @@ class TestTlsRouteProgress(unittest.TestCase):
         with patch('flowguard.proxy.time.monotonic', side_effect=lambda: now[0]), \
              patch('flowguard.proxy.select.select', side_effect=ready), \
              patch('flowguard.proxy.mark_ip_dead') as dead:
-            self.proxy._pipe_sockets(client, upstream, host=host, strategy='combo_tlsrec_tcpsplit',
+            self.proxy._pipe_sockets(client, upstream, host=host, strategy=strategy,
                                      got_initial_response=True, tls_tunnel=True, route_network=route_network)
         dead.assert_not_called()
         self.assertEqual(b''.join(delivered[client]), response)
@@ -69,6 +70,11 @@ class TestTlsRouteProgress(unittest.TestCase):
         self.assertEqual(self.run_flow(100000), 'progress')
         self.proxy.strategy_engine.record_success.assert_called_once()
         self.assertEqual(_WORKING_IP_CACHE.get('surfshark.com'), '104.18.120.10')
+
+    def test_direct_transfer_trains_selector_too(self):
+        self.assertEqual(self.run_flow(100000, strategy='direct'), 'progress')
+        self.proxy.strategy_engine.record_success.assert_called_once_with(
+            'surfshark.com', 'direct', ip='104.18.120.10')
 
     def test_short_transfer_and_websocket_are_not_degraded(self):
         self.assertEqual(self.run_flow(500), 'unknown')

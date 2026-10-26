@@ -324,9 +324,8 @@ def is_bogon_or_sinkhole_ip(ip: Optional[str]) -> bool:
         return True
     if ip.startswith("127."):
         return True
-    # Провайдерские sinkhole-подсети (РФ блокировки мобильных операторов: МТС, Билайн, Мегафон, Tele2)
-    if ip.startswith("8.47.69.") or ip.startswith("8.6.112."):
-        return True
+    # Публичную подсеть нельзя считать заглушкой без проверки конкретного маршрута.
+    # Ошибки её узлов учитываются временно в RouteHealth, отдельно для каждого хоста.
     # Приватные подсети RFC 1918, RFC 2544 (198.18.0.0/15) и CGNAT (подменяемые DNS-заглушками провайдеров / VPN Fake-IP)
     if ip.startswith("10.") or ip.startswith("192.168.") or ip.startswith("169.254.") or ip.startswith("198.18.") or ip.startswith("198.19."):
         return True
@@ -1409,7 +1408,8 @@ class DPIBypassProxy:
                 # Если candidate_ips уже имеет валидные IP (из кэша или getaddrinfo),
                 # НЕ выполняем синхронный DoH для предотвращения сетевой лавины (особенно для Discord CDN).
                 # Исключение: для заблокированных доменов из whitelist (кроме Discord) или при отсутствии IP / кастомном DNS
-                # запрашиваем DoH и ставим чистые DoH адреса в НАЧАЛО candidate_ips, обходя отравленные оператором IP.
+                # запрашиваем также DoH. Валидные системные ответы сохраняются;
+                # приоритет DoH задаёт явная настройка пользовательского DNS.
                 need_doh = False
                 has_custom_dns = getattr(getattr(self, "config", None), "enable_custom_dns", False)
                 if not candidate_ips or has_custom_dns or host in _DNS_CACHE:
@@ -1444,8 +1444,8 @@ class DPIBypassProxy:
                         _DNS_CACHE.set(host.lower().strip("."), doh_resolved[0])
 
                     if doh_resolved:
-                        if is_whitelisted:
-                            # Для whitelist ставим чистые DoH адреса в НАЧАЛО candidate_ips, обходя отравленные оператором IP
+                        if has_custom_dns:
+                            # Пользователь явно выбрал DNS; его ответы имеют начальный приоритет.
                             candidate_ips = doh_resolved + [ip for ip in candidate_ips if ip not in doh_resolved]
                         else:
                             for hip in doh_resolved:
@@ -2495,7 +2495,7 @@ class DPIBypassProxy:
             if network != getattr(self.strategy_engine, '_current_network', 'default'):
                 return
             mark_ip_working(target_ip, host)
-            if host and strategy and strategy not in ('direct', 'http'):
+            if host and strategy and strategy != 'http':
                 self.strategy_engine.record_success(host, strategy, ip=target_ip)
 
         def record_suspect(progress, reason):
