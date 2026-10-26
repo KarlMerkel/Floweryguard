@@ -20,6 +20,7 @@ import sys
 import os
 import struct
 import queue
+import weakref
 from typing import Optional, Tuple, List, Dict, Any, Set
 try:
     from flowguard.config import Config, load_whitelist_domains, is_host_in_whitelist
@@ -625,7 +626,11 @@ _SOCKET_META = ThreadSafeBoundedCache(maxsize=2048)
 def _set_socket_meta(sock: socket.socket, target_ip: str, connect_rtt: float) -> None:
     """Сохраняет метаданные подключения (IP, RTT) для сокета в потокобезопасный ограниченный кэш."""
     try:
-        _SOCKET_META.set(id(sock), {"target_ip": target_ip, "connect_rtt": connect_rtt})
+        _SOCKET_META.set(id(sock), {
+            "socket_ref": weakref.ref(sock),
+            "target_ip": target_ip,
+            "connect_rtt": connect_rtt,
+        })
     except Exception:
         pass
 
@@ -633,7 +638,11 @@ def _get_socket_meta(sock: Optional[socket.socket]) -> Dict[str, Any]:
     """Возвращает метаданные подключения для сокета."""
     if not sock:
         return {}
-    return _SOCKET_META.get(id(sock), {})
+    meta = _SOCKET_META.get(id(sock), {})
+    owner = meta.get("socket_ref")
+    if owner is None or owner() is not sock:
+        return {}
+    return {"target_ip": meta["target_ip"], "connect_rtt": meta["connect_rtt"]}
 
 def _clean_socket_meta(sock: Optional[socket.socket]) -> None:
     """Удаляет метаданные закрытого сокета."""

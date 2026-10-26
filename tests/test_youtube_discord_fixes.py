@@ -400,9 +400,9 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
         target_sock2 = MagicMock()
 
         # Имитируем сокетную мету
-        from flowguard.proxy import _SOCKET_META
-        _SOCKET_META.set(id(target_sock1), {"target_ip": "172.217.132.170", "connect_rtt": 0.030})
-        _SOCKET_META.set(id(target_sock2), {"target_ip": "172.217.132.170", "connect_rtt": 0.030})
+        from flowguard.proxy import _set_socket_meta
+        _set_socket_meta(target_sock1, "172.217.132.170", 0.030)
+        _set_socket_meta(target_sock2, "172.217.132.170", 0.030)
 
         client_hello = (
             b"\x16\x03\x01\x00\x30"
