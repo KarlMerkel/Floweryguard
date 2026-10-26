@@ -1584,7 +1584,8 @@ class DPIBypassProxy:
         # Для Gateway и Core Web Discord (discord.com) приоритетом #1 ВСЕГДА являются доказанно
         # работающие через ТСПУ узлы (162.159.134.234 для gateway и 162.159.136.232 для discord.com).
         # Ротация на вторичные узлы выполняется ТОЛЬКО если первичный узел помечен как мертвый (dead).
-        # Для Media/CDN (аватарки, гифки, картинки) выполняется параллельная балансировка по всему CDN Anycast пулу.
+        # Для Media/CDN сначала используем тот же узел: остальные адреса могут пройти TLS,
+        # но зависнуть после 14–16 КБ. Мёртвые и явно исключённые адреса остаются вне выбора.
         if (is_net_discord or is_discord_media_target) and len(candidate_ips) > 1:
             global _DISCORD_IP_ROTATION_INDEX
             is_gw_host = ("gateway" in h_disc or h_disc.endswith(".discord.gg") or h_disc == "discord.gg")
@@ -1599,10 +1600,10 @@ class DPIBypassProxy:
                 pinned_primary = "162.159.136.232"
             elif h_disc.endswith("cdn.discordapp.com") or h_disc == "cdn.discordapp.com":
                 pool = DISCORD_CDN_ANYCAST_IPS
-                pinned_primary = None
+                pinned_primary = "162.159.136.232"
             elif "media" in h_disc or "images-ext" in h_disc or "attachments" in h_disc or is_discord_media_target:
                 pool = DISCORD_MEDIA_ANYCAST_IPS
-                pinned_primary = None
+                pinned_primary = "162.159.136.232"
             else:
                 pool = DISCORD_CLOUDFLARE_ANYCAST_IPS
                 pinned_primary = None

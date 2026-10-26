@@ -135,8 +135,9 @@ class TestDiscordCDNAndWhitelistFixes(unittest.TestCase):
         self.assertIsNotNone(res_sock)
         self.assertIsNone(_WORKING_IP_CACHE.get("discord.com"))
 
-    def test_discord_cdn_anycast_rotation_cycles_across_requests(self):
-        """Параллельные запросы к cdn.discordapp.com циклически перебирают Anycast IP из DISCORD_CDN_ANYCAST_IPS."""
+    def test_discord_cdn_anycast_rotation_when_primary_unavailable(self):
+        """При отказе основного узла CDN продолжает ротировать резервные адреса."""
+        mark_ip_dead("162.159.136.232", duration=45.0)
         connected_ips = []
 
         with patch("socket.getaddrinfo", return_value=[
@@ -155,6 +156,7 @@ class TestDiscordCDNAndWhitelistFixes(unittest.TestCase):
         self.assertEqual(len(connected_ips), 3)
         for ip in connected_ips:
             self.assertIn(ip, DISCORD_CDN_ANYCAST_IPS)
+            self.assertNotEqual(ip, "162.159.136.232")
         # Все 3 вызова получили РАЗНЫЕ IP благодаря ротации
         self.assertEqual(len(set(connected_ips)), 3)
 
