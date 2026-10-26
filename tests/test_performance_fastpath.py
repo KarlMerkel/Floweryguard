@@ -67,8 +67,8 @@ class TestPerformanceOptimizations(unittest.TestCase):
 
             res = self.proxy._connect_target(host, 443)
             self.assertIsNotNone(res)
-            # Убеждаемся, что старый IP помечен как мертвый и сброшен из кэша
-            self.assertTrue(is_ip_dead(stale_ip))
+            # Старый IP понижен для этого хоста и сброшен из кэша
+            self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, host, 443, stale_ip), 'suspect')
             self.assertIsNone(_WORKING_IP_CACHE.get(host))
 
     def test_adaptive_probe_timeout_scaling(self):

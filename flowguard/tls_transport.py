@@ -1,4 +1,4 @@
-"""Передача непрозрачного TLS-потока с наблюдением за прогрессом."""
+"""Двунаправленная передача TLS с ограниченными буферами и временем простоя."""
 
 import select
 import socket
@@ -9,66 +9,89 @@ from .route_health import TransferProgress
 
 def relay_tls(client, upstream, running, timeout, buffer_size, on_bytes, on_progress,
               long_lived=False, on_suspect=None):
-    """Не расшифровывает и не повторяет запросы; возвращает наблюдение и причину остановки."""
+    """Не расшифровывает и не повторяет запросы; учитывает доставленные байты."""
     progress = TransferProgress()
-    readers = [client, upstream]
+    sockets = (client, upstream)
+    buffers = {client: bytearray(), upstream: bytearray()}
+    readers = set(sockets)
+    shutdown_pending = set()
     announced = False
-    half_closed = False
-    reason = 'stopped'
     last_activity = time.monotonic()
-    client.settimeout(3600.0 if long_lived else 60.0)
-    upstream.settimeout(3600.0 if long_lived else 60.0)
+    short_idle = max(15.0, min(60.0, float(timeout)))
+    capacity = max(4096, min(buffer_size, 262144))
+    for sock in sockets:
+        sock.setblocking(False)
     while running():
-        wait = 3600.0 if long_lived else (300.0 if progress.server_bytes else max(15.0, timeout))
-        if half_closed:
-            wait = max(15.0, timeout)
+        # Зависший ответ закрывается быстро, чтобы клиент повторил запрос по другому адресу;
+        # простаивающее keep-alive соединение с завершённым ответом браузер может переиспользовать.
+        if client not in readers or (not long_lived and (progress.server_bytes == 0 or progress.stall_window)):
+            wait = short_idle
+        else:
+            wait = 3600.0 if long_lived else 300.0
         remaining = wait - (time.monotonic() - last_activity)
         if remaining <= 0:
-            reason = 'client_eof' if half_closed else 'idle_timeout'
-            break
+            if buffers[client]:
+                return progress, 'client_write_error'
+            if buffers[upstream]:
+                return progress, 'server_error'
+            return progress, 'client_eof' if client not in readers else 'idle_timeout'
+        readable_sockets = [s for s in sockets if s in readers and
+                            len(buffers[upstream if s is client else client]) < capacity]
+        writable_sockets = [s for s in sockets if buffers[s]]
+        if not readable_sockets and not writable_sockets:
+            return progress, 'server_eof'
         try:
-            # Проверять остановку прокси, не сокращая срок жизни WebSocket/RTC.
-            readable, _, _ = select.select(readers, [], [], min(1.0, remaining))
+            # Ошибки сокета проявляются в recv/send; exceptfds в Windows означает OOB-данные.
+            readable, writable, _ = select.select(
+                readable_sockets, writable_sockets, [], min(0.25, remaining))
         except (OSError, ValueError):
-            reason = 'select_error'
-            break
-        if not readable:
-            continue
-        for source in readable:
-            destination = upstream if source is client else client
+            return progress, 'select_error'
+        for destination in writable:
             try:
-                data = source.recv(buffer_size)
-            except OSError:
-                reason = 'client_reset' if source is client else 'server_error'
-                return progress, reason
-            if not data:
-                if source is upstream:
-                    return progress, 'server_eof'
-                half_closed = True
-                progress.client_closed_at = time.monotonic()
-                last_activity = progress.client_closed_at
-                if (not long_lived and on_suspect is not None
-                        and progress.finish('client_eof', progress.client_closed_at) == 'suspect'):
-                    on_suspect(progress, 'client_eof')
-                readers.remove(client)
-                try:
-                    upstream.shutdown(socket.SHUT_WR)
-                except OSError:
-                    return progress, 'server_error'
+                count = destination.send(buffers[destination])
+            except (BlockingIOError, InterruptedError):
                 continue
-            try:
-                destination.sendall(data)
             except OSError:
-                reason = 'client_write_error' if destination is client else 'server_error'
-                return progress, reason
+                return progress, 'client_write_error' if destination is client else 'server_error'
+            if count <= 0:
+                return progress, 'client_write_error' if destination is client else 'server_error'
+            del buffers[destination][:count]
             last_activity = time.monotonic()
-            if source is client:
-                progress.sent(len(data), time.monotonic())
-                on_bytes('tx', len(data))
-            else:
-                progress.received(len(data), time.monotonic())
-                on_bytes('rx', len(data))
+            if destination is client:
+                progress.received(count, last_activity)
+                on_bytes('rx', count)
                 if progress.proven and not announced:
                     announced = True
                     on_progress()
-    return progress, reason
+            else:
+                progress.sent(count, last_activity)
+                on_bytes('tx', count)
+        for source in readable:
+            destination = upstream if source is client else client
+            try:
+                data = source.recv(capacity - len(buffers[destination]))
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError:
+                return progress, 'client_reset' if source is client else 'server_error'
+            if data:
+                buffers[destination].extend(data)
+                continue
+            readers.discard(source)
+            shutdown_pending.add(destination)
+            if source is client:
+                progress.client_closed_at = time.monotonic()
+                last_activity = progress.client_closed_at
+                if (not long_lived and on_suspect is not None and
+                        progress.finish('client_eof', last_activity) == 'suspect'):
+                    on_suspect(progress, 'client_eof')
+        for destination in list(shutdown_pending):
+            if not buffers[destination]:
+                try:
+                    destination.shutdown(socket.SHUT_WR)
+                except OSError:
+                    return progress, 'server_error' if destination is upstream else 'client_write_error'
+                shutdown_pending.remove(destination)
+        if upstream not in readers and not buffers[client]:
+            return progress, 'server_eof'
+    return progress, 'stopped'

@@ -615,10 +615,9 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
             ]
             res = self.proxy._connect_target("fast.example.com", 443)
             self.assertIsNotNone(res)
-            # Отказавший IP помечен как мертвый
-            self.assertTrue(is_ip_dead("192.0.2.1"))
-            # Успешный IP жив
-            self.assertFalse(is_ip_dead("192.0.2.2"))
+            # Отказавший IP понижен для этого хоста, успешный — нет
+            self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, "fast.example.com", 443, "192.0.2.1"), 'suspect')
+            self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, "fast.example.com", 443, "192.0.2.2"), 'unknown')
 
     def test_pipe_sockets_discord_and_established_idle_timeout(self):
         """_pipe_sockets устанавливает 60.0с сокет таймауты, 15.0с stall timeout и 45.0с idle_timeout для Discord."""
@@ -759,14 +758,22 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
             self.assertIn("discord", browsers)
             self.assertEqual(browsers["discord"], electron_path)
 
-    def test_youtube_and_google_strategy_pinned_to_combo(self):
-        """Для YouTube и Google кластера стратегия жестко фиксируется на combo_tlsrec_tcpsplit."""
-        strat_yt = self.proxy.strategy_engine.select_strategy("www.youtube.com", is_youtube=True)
-        self.assertEqual(strat_yt, "combo_tlsrec_tcpsplit")
-        strat_gg = self.proxy.strategy_engine.select_strategy("rr1---sn-4g5ednks.googlevideo.com")
-        self.assertEqual(strat_gg, "combo_tlsrec_tcpsplit")
-        strat_dc = self.proxy.strategy_engine.select_strategy("gateway.discord.gg", is_discord=True)
-        self.assertEqual(strat_dc, "combo_tlsrec_tcpsplit")
+    def fresh_engine(self):
+        """Движок без накопленных другими тестами наблюдений."""
+        import os
+        import tempfile
+        from flowguard.strategy import ThompsonStrategySelector
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return ThompsonStrategySelector(enabled=True, scores_file=os.path.join(directory.name, "scores.json"))
+
+    def test_youtube_and_google_start_with_combo(self):
+        """Без наблюдений YouTube, Google и Discord начинают с combo_tlsrec_tcpsplit, без случайной разведки."""
+        engine = self.fresh_engine()
+        for _ in range(20):
+            self.assertEqual(engine.select_strategy("www.youtube.com", is_youtube=True), "combo_tlsrec_tcpsplit")
+            self.assertEqual(engine.select_strategy("rr1---sn-4g5ednks.googlevideo.com"), "combo_tlsrec_tcpsplit")
+            self.assertEqual(engine.select_strategy("gateway.discord.gg", is_discord=True), "combo_tlsrec_tcpsplit")
 
     def test_pipe_sockets_websocket_sets_3600_timeout(self):
         """Для WebSocket хостов (is_ws=True) _pipe_sockets устанавливает таймаут сокетов 3600.0с."""
@@ -820,10 +827,11 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
         client_sock.settimeout.assert_called_with(3600.0)
         target_sock.settimeout.assert_called_with(3600.0)
 
-    def test_youtube_subdomains_pinned_to_combo_without_flags(self):
-        """Все варианты доменов YouTube (youtube-nocookie.com, yt.be, gvt1.com) жестко фиксируются на combo."""
+    def test_youtube_subdomains_start_with_combo_without_flags(self):
+        """Все варианты доменов YouTube (youtube-nocookie.com, yt.be, gvt1.com) без наблюдений начинают с combo."""
+        engine = self.fresh_engine()
         for d in ["youtube-nocookie.com", "yt.be", "gvt1.com", "www.youtube-nocookie.com", "rr3---sn-test.googlevideo.com"]:
-            strat = self.proxy.strategy_engine.select_strategy(d)
+            strat = engine.select_strategy(d)
             self.assertEqual(strat, "combo_tlsrec_tcpsplit", f"Failed for {d}")
 
     def test_discord_voice_helper_prioritizes_active_discord_udp(self):

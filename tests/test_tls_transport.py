@@ -47,8 +47,12 @@ class TestTlsTransport(unittest.TestCase):
         now = [0]
         events = iter([(0, client), (1, upstream), (9, client), (24, None)])
         suspect = Mock()
+        client.send.side_effect = lambda data: len(data)
+        upstream.send.side_effect = lambda data: len(data)
 
         def ready(*args):
+            if args[1]:
+                return [], args[1], []
             now[0], source = next(events)
             if source is None:
                 suspect.assert_called_once()
@@ -110,12 +114,44 @@ class TestTlsTransport(unittest.TestCase):
         self.assertEqual(sum(n for direction, n in counters if direction == 'rx'), len(response))
         reward.assert_called_once_with()
 
+    def idle_close_time(self, response_size):
+        """Момент закрытия простаивающего туннеля после запроса и ответа заданного размера."""
+        client, upstream = Mock(), Mock()
+        client.recv.return_value = b'request'
+        upstream.recv.return_value = b'x' * response_size
+        client.send.side_effect = lambda data: len(data)
+        upstream.send.side_effect = lambda data: len(data)
+        now = [0.0]
+        events = iter([client, upstream])
+
+        def ready(readers, writers, *_):
+            if writers:
+                return [], writers, []
+            source = next(events, None)
+            if source is None:
+                now[0] += 1.0
+                return [], [], []
+            return [source], [], []
+
+        with patch('flowguard.tls_transport.select.select', side_effect=ready), \
+             patch('flowguard.tls_transport.time.monotonic', side_effect=lambda: now[0]):
+            progress, reason = relay_tls(client, upstream, lambda: True, 15, 65536, Mock(), Mock())
+        self.assertEqual(reason, 'idle_timeout')
+        self.assertEqual(progress.server_bytes, response_size)
+        return now[0]
+
+    def test_stalled_response_closes_quickly_but_finished_keepalive_stays(self):
+        # Обрыв на 14 КБ: клиент быстро получает закрытие и повторяет запрос по другому адресу.
+        self.assertLessEqual(self.idle_close_time(14000), 16.0)
+        # Завершённый короткий ответ: keep-alive соединение переиспользуется браузером.
+        self.assertGreaterEqual(self.idle_close_time(3000), 300.0)
+
     def test_delivery_error_does_not_reward_unforwarded_bytes(self):
         client, upstream = Mock(), Mock()
         upstream.recv.return_value = b'x' * 100000
-        client.sendall.side_effect = ConnectionResetError()
+        client.send.side_effect = ConnectionResetError()
         reward = Mock()
-        with patch('flowguard.tls_transport.select.select', return_value=([upstream], [], [])):
+        with patch('flowguard.tls_transport.select.select', side_effect=lambda readers, writers, *_: ([], writers, []) if writers else ([upstream], [], [])):
             progress, reason = relay_tls(client, upstream, lambda: True, 1, 131072, Mock(), reward)
         self.assertEqual(reason, 'client_write_error')
         self.assertEqual(progress.server_bytes, 0)

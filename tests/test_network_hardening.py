@@ -311,9 +311,9 @@ class TestNetworkSubsystemHardening(unittest.TestCase):
         self.assertNotIn("mark_ip_dead(current_ip", source_flowguard)
         self.assertNotIn("mark_ip_dead(current_ip", source_release)
 
-    def test_transient_connect_failure_bans_for_30_seconds_not_300(self):
-        """При кратковременном таймауте соединения на мобильной сети IP должен помечаться
-        нерабочим только на 30.0с (вместо 300с), предотвращая 5-минутную блокировку Anycast IP.
+    def test_transient_connect_failure_only_deprioritizes_route(self):
+        """Кратковременный таймаут на мобильной сети не банит IP глобально: маршрут этого хоста
+        понижается в приоритете на 45 с, а другие домены на том же Anycast IP не затрагиваются.
         """
         test_ip = "192.0.2.77"
         mark_ip_working(test_ip)
@@ -328,12 +328,10 @@ class TestNetworkSubsystemHardening(unittest.TestCase):
             with patch("flowguard.proxy.resolve_fallback_dns", return_value=None):
                 self.proxy._connect_target(test_ip, 443, target_ip=None)
 
-        # Проверяем, что в кэше мертвых IP время истечения установлено примерно на +30с (а не +300с)
-        expire_time = _DEAD_IP_CACHE.get(test_ip)
-        self.assertIsNotNone(expire_time)
-        remaining = expire_time - time.time()
-        self.assertLessEqual(remaining, 35.0)
-        self.assertGreater(remaining, 15.0)
+        network = self.proxy.strategy_engine._current_network
+        self.assertIsNone(_DEAD_IP_CACHE.get(test_ip))
+        self.assertEqual(self.proxy.route_health.status(network, test_ip, 443, test_ip), 'suspect')
+        self.assertEqual(self.proxy.route_health.status(network, "other.example", 443, test_ip), 'unknown')
 
         mark_ip_working(test_ip)
 

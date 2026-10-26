@@ -248,9 +248,9 @@ class TestLivePreconnectDohFixes(unittest.TestCase):
                 f"Domain '{dom}' should be pinned to combo_tlsrec_tcpsplit, got '{strat}'"
             )
 
-    def test_discord_media_fallback_keeps_combo_tlsrec_tcpsplit(self):
-        """Проверяет, что для медиа Discord get_fallback_strategy ВСЕГДА сохраняет combo_tlsrec_tcpsplit
-        и никогда не переключается на tcp_split_sni_mid или tls_record_frag.
+    def test_discord_media_fallback_avoids_failed_combo_and_sni_mid(self):
+        """После сбоя combo на том же IP медиа Discord не повторяет его и не выбирает
+        tcp_split_sni_mid, direct или boringssl_split.
         """
         media_hosts = [
             "cdn.discordapp.com",
@@ -266,10 +266,10 @@ class TestLivePreconnectDohFixes(unittest.TestCase):
                 failed_strategies=["combo_tlsrec_tcpsplit"],
                 is_discord=True,
             )
-            self.assertEqual(
+            self.assertIn(
                 fallback,
-                "combo_tlsrec_tcpsplit",
-                f"Fallback for Discord media '{host}' must keep combo_tlsrec_tcpsplit, got '{fallback}'"
+                ("tls_record_frag", "multi_split", "tcp_split_sni_start"),
+                f"Fallback for Discord media '{host}' got '{fallback}'"
             )
 
     @patch("socket.socket")
@@ -301,8 +301,8 @@ class TestLivePreconnectDohFixes(unittest.TestCase):
             # Проверяем, что соединение успешно установлено со вторым (здоровым DoH) сокетом
             self.assertIsNotNone(s)
             self.assertEqual(s, mock_sock_healthy)
-            # Отравленный IP должен быть помечен как мертвый
-            self.assertTrue(is_ip_dead(poisoned_ip))
+            # Отравленный IP понижен для этого хоста
+            self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, "blocked-site.org", 443, poisoned_ip), 'suspect')
             # Таймаут первого подключения должен быть ограничен min(1.5, timeout) = 1.5s
             mock_sock_poisoned.settimeout.assert_called_with(1.5)
 

@@ -35,7 +35,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         self.assertEqual(classify_cdn_cluster("media.giphy.com"), "discord")
 
     def test_get_fallback_strategy_for_media_hosts(self):
-        """Tenor, Giphy and Discord media must always return combo_tlsrec_tcpsplit in fallback."""
+        """Медиа Discord, Tenor и Giphy: combo, пока он не упал; после сбоя combo — другая совместимая техника."""
         selector = ThompsonStrategySelector(enabled=False)
         media_hosts = [
             "tenor.googleapis.com",
@@ -49,8 +49,10 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
             "images-ext-1.discordapp.net"
         ]
         for host in media_hosts:
-            strat = selector.get_fallback_strategy(host, failed_strategy="combo_tlsrec_tcpsplit")
+            strat = selector.get_fallback_strategy(host, failed_strategy="tls_record_frag")
             self.assertEqual(strat, "combo_tlsrec_tcpsplit", f"Failed for {host}")
+            strat = selector.get_fallback_strategy(host, failed_strategy="combo_tlsrec_tcpsplit")
+            self.assertIn(strat, ("tls_record_frag", "multi_split", "tcp_split_sni_start"), f"Failed for {host}")
 
     def test_pipe_sockets_got_initial_response_acknowledged(self):
         """_pipe_sockets sets server_replied_app_data=True and total_server_bytes=1 on got_initial_response."""
@@ -71,7 +73,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         client_sock.recv.return_value = b""
 
         with patch("select.select", return_value=([client_sock], [], [])), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
 
             proxy._pipe_sockets(
@@ -123,7 +125,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = [b"HTTP/2 200 OK\r\n\r\n<img_bytes_12345>"]
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
 
             proxy._pipe_sockets(
@@ -184,7 +186,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
 
         with patch("select.select", side_effect=fake_select), \
              patch("time.time", side_effect=time_seq), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
 
             proxy._pipe_sockets(
@@ -271,7 +273,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = [b"HTTP/2 200 OK\r\n\r\n<first_image_chunk>"]
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
 
             proxy._pipe_sockets(
@@ -315,7 +317,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = socket.timeout("timed out")
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead:
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead:
 
             proxy._pipe_sockets(
                 client_sock,
@@ -326,7 +328,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
             )
 
             # Server never replied, so this stall properly marks IP dead
-            mock_mark_dead.assert_called_with("162.159.130.233", duration=30.0)
+            self.assertEqual(mock_mark_dead.call_args.args[2], "162.159.130.233")
             proxy.strategy_engine.record_failure.assert_called_with(
                 "cdn.discordapp.com", "combo_tlsrec_tcpsplit", ip="162.159.130.233", is_tspu=False
             )
@@ -363,7 +365,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = [b"HTTP/2 200 OK\r\n\r\n<img_data>"]
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
 
             proxy._pipe_sockets(
@@ -419,7 +421,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
 
         with patch("select.select", side_effect=fake_select), \
              patch("time.time", side_effect=fake_time), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
 
             proxy._pipe_sockets(
@@ -467,7 +469,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = [b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n" + b"G" * 5000]
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
 
             proxy._pipe_sockets(
@@ -534,7 +536,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = []
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
             proxy._pipe_sockets(
                 client_sock,
@@ -543,7 +545,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
                 strategy="combo_tlsrec_tcpsplit",
                 got_initial_response=False
             )
-            mock_mark_dead.assert_called_with(target_ip, duration=45.0)
+            self.assertEqual(mock_mark_dead.call_args.args[2], target_ip)
             mock_mark_working.assert_not_called()
             proxy.strategy_engine.record_failure.assert_called_with(
                 "gateway.discord.gg", "combo_tlsrec_tcpsplit", ip=target_ip, is_tspu=False
@@ -580,7 +582,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = [b"HTTP/1.1 101 Switching Protocols\r\n\r\n" + b"X" * 12000]
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
             proxy._pipe_sockets(
                 client_sock,
@@ -751,7 +753,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
         target_sock.recv.side_effect = []
 
         with patch("select.select", side_effect=fake_select), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
             proxy._pipe_sockets(
                 client_sock,
@@ -761,7 +763,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
                 got_initial_response=False
             )
             mock_mark_working.assert_not_called()
-            mock_mark_dead.assert_called_with(target_ip, duration=45.0)
+            self.assertEqual(mock_mark_dead.call_args.args[2], target_ip)
             proxy.strategy_engine.record_failure.assert_called_with(
                 "discord.com", "combo_tlsrec_tcpsplit", ip=target_ip, is_tspu=False
             )
@@ -870,7 +872,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
 
         with patch("select.select", side_effect=fake_select), \
              patch("time.time", side_effect=fake_time), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
             proxy._pipe_sockets(
                 client_sock,
@@ -879,7 +881,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
                 strategy="combo_tlsrec_tcpsplit",
                 got_initial_response=False
             )
-            mock_mark_dead.assert_called_with(target_ip, duration=45.0)
+            self.assertEqual(mock_mark_dead.call_args.args[2], target_ip)
             mock_mark_working.assert_not_called()
             proxy.strategy_engine.record_failure.assert_called_with(
                 "gateway.discord.gg", "combo_tlsrec_tcpsplit", ip=target_ip, is_tspu=False
@@ -924,7 +926,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
 
         with patch("select.select", side_effect=fake_select), \
              patch("time.time", side_effect=fake_time), \
-             patch("flowguard.proxy.mark_ip_dead") as mock_mark_dead, \
+             patch.object(DPIBypassProxy, "_record_route_failure") as mock_mark_dead, \
              patch("flowguard.proxy.mark_ip_working") as mock_mark_working:
             proxy._pipe_sockets(
                 client_sock,
@@ -933,7 +935,7 @@ class TestDiscordMediaDeepFixes(unittest.TestCase):
                 strategy="combo_tlsrec_tcpsplit",
                 got_initial_response=False
             )
-            mock_mark_dead.assert_called_with(target_ip, duration=45.0)
+            self.assertEqual(mock_mark_dead.call_args.args[2], target_ip)
             mock_mark_working.assert_not_called()
             proxy.strategy_engine.record_failure.assert_called_with(
                 "discord.com", "combo_tlsrec_tcpsplit", ip=target_ip, is_tspu=False

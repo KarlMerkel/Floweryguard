@@ -28,6 +28,12 @@ class TransferProgress:
     def proven(self):
         return self.server_bytes >= 65536
 
+    @property
+    def stall_window(self):
+        """Запрос отправлен, а ответ отсутствует или замер на типичном для обрыва объёме."""
+        return (not self.proven and 0 < self.client_bytes < 32768
+                and (self.server_bytes == 0 or 6144 <= self.server_bytes < 32768))
+
     def finish(self, reason, now):
         if self.proven:
             return 'progress'
@@ -36,9 +42,7 @@ class TransferProgress:
         waiting_since = self.last_received if self.server_bytes else self.first_sent
         # Это повод сменить приоритет следующего соединения, а не доказательство DPI.
         # Короткие ответы и отмены не штрафуют стратегию или IP других доменов.
-        if (reason in ('client_eof', 'client_reset', 'idle_timeout')
-                and (self.server_bytes == 0 or 6144 <= self.server_bytes < 32768)
-                and 0 < self.client_bytes < 32768
+        if (reason in ('client_eof', 'client_reset', 'idle_timeout') and self.stall_window
                 and waiting_since is not None and now - waiting_since >= 3.0):
             return 'suspect'
         return 'unknown'
@@ -78,6 +82,14 @@ class RouteHealth:
                 del self._entries[key]
                 return 'unknown'
             return entry[0]
+
+    def proven_ips(self, network, port):
+        """Адреса, через которые в этой сети недавно прошёл заметный объём данных; сначала свежие."""
+        now = self._clock()
+        with self._lock:
+            found = [key[3] for key, (outcome, expires) in reversed(self._entries.items())
+                     if key[0] == network and key[2] == port and outcome == 'progress' and expires > now]
+        return list(dict.fromkeys(found))
 
     def clear(self):
         with self._lock:

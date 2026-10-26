@@ -96,8 +96,9 @@ class TestDiscordAnycastRotationAndTrapFixes(unittest.TestCase):
 
         # 1. IP вытеснен из _WORKING_IP_CACHE
         self.assertIsNone(_WORKING_IP_CACHE.get(host))
-        # 2. IP помечен как мертвый на 45с
-        self.assertTrue(is_ip_dead(target_ip))
+        # 2. Маршрут хоста через этот IP понижен для новых соединений, IP не забанен глобально
+        self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, host, 443, target_ip), 'suspect')
+        self.assertFalse(is_ip_dead(target_ip))
         # 3. IP записан в _RECENT_DISCORD_IPS
         self.assertIsNotNone(_RECENT_DISCORD_IPS.get(target_ip))
         # 4. Зафиксирован сбой (failure)
@@ -284,8 +285,9 @@ class TestDiscordAnycastRotationAndTrapFixes(unittest.TestCase):
 
         # 1. IP вытеснен из _WORKING_IP_CACHE
         self.assertIsNone(_WORKING_IP_CACHE.get(host))
-        # 2. IP помечен как мертвый на 45с
-        self.assertTrue(is_ip_dead(target_ip))
+        # 2. Маршрут хоста через этот IP понижен для новых соединений, IP не забанен глобально
+        self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, host, 443, target_ip), 'suspect')
+        self.assertFalse(is_ip_dead(target_ip))
         # 3. IP записан в _RECENT_DISCORD_IPS
         self.assertIsNotNone(_RECENT_DISCORD_IPS.get(target_ip))
         # 4. Зафиксирован сбой (failure)
@@ -429,7 +431,7 @@ class TestDiscordAnycastRotationAndTrapFixes(unittest.TestCase):
 
         with patch("time.time", side_effect=fake_time), patch("select.select", side_effect=fake_select):
             self.proxy._pipe_sockets(client_sock, target_sock, host=host, strategy="combo_tlsrec_tcpsplit")
-            self.assertTrue(is_ip_dead(target_ip))
+            self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, host, 443, target_ip), 'suspect')
             self.proxy.strategy_engine.record_failure.assert_called_with(
                 host, "combo_tlsrec_tcpsplit", ip=target_ip, is_tspu=False
             )

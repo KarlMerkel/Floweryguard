@@ -126,8 +126,8 @@ class TestDiscordPMTUAndStartingFixes(unittest.TestCase):
 
         # 1. IP удален из _WORKING_IP_CACHE
         self.assertIsNone(_WORKING_IP_CACHE.get(host))
-        # 2. IP помечен как мертвый
-        self.assertTrue(is_ip_dead(target_ip))
+        # 2. Маршрут хоста через этот IP понижен для новых соединений
+        self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, host, 443, target_ip), 'suspect')
         # 3. Зафиксирован штраф (failure) для стратегии и IP
         self.proxy.strategy_engine.record_failure.assert_called_with(
             host, "combo_tlsrec_tcpsplit", ip=target_ip, is_tspu=False
@@ -160,7 +160,7 @@ class TestDiscordPMTUAndStartingFixes(unittest.TestCase):
 
         # Проверяем, что кэш сброшен, IP помечен как мертвый, а успех не зафиксирован
         self.assertIsNone(_WORKING_IP_CACHE.get(host))
-        self.assertTrue(is_ip_dead(target_ip))
+        self.assertEqual(self.proxy.route_health.status(self.proxy.strategy_engine._current_network, host, 443, target_ip), 'suspect')
         self.proxy.strategy_engine.record_failure.assert_called_with(
             host, "combo_tlsrec_tcpsplit", ip=target_ip, is_tspu=False
         )

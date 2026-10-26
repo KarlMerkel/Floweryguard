@@ -194,6 +194,18 @@ ALL_STRATEGIES = [
 ]
 
 
+# Порядок предпочтения при равных оценках для целевых сервисов: direct — последний.
+_STABLE_ORDER = (
+    "combo_tlsrec_tcpsplit",
+    "tcp_split_sni_mid",
+    "multi_split",
+    "tls_record_frag",
+    "tcp_split_sni_start",
+    "boringssl_split",
+    "direct",
+)
+
+
 MAX_SCORES_ENTRIES = 2000
 MAX_LOGGED_ENTRIES = 500
 
@@ -810,18 +822,6 @@ class ThompsonStrategySelector:
         if override:
             return override
 
-        # Для доменов из whitelist жестко фиксируем combo_tlsrec_tcpsplit,
-        # устраняя случайный сброс соединений (MAB exploration drop)
-        if is_whitelisted:
-            with self._lock:
-                net_scores = self._scores.setdefault(self._current_network, {})
-                key = self._get_composite_key(host, ip)
-                if key not in net_scores:
-                    net_scores[key] = self._init_domain_priors(self._get_domain_key(host))
-                if "combo_tlsrec_tcpsplit" not in net_scores[key]:
-                    net_scores[key]["combo_tlsrec_tcpsplit"] = [12.0, 1.0]
-            return "combo_tlsrec_tcpsplit"
-
         cluster = classify_cdn_cluster(host, ip)
         h_lower = host.lower() if host else ""
         if not is_youtube and (cluster == "google" or any(p in h_lower for p in ("youtube", "googlevideo", "youtu.be", "ytimg", "ggpht", "gvt1"))):
@@ -851,30 +851,6 @@ class ThompsonStrategySelector:
 
         is_major_blocked = any(b in h_lower for b in MAJOR_BLOCKED_PATTERNS)
 
-        # Для Core Discord (discord.com, gateway.discord.gg), Discord Media, YouTube/Google,
-        # а также всех крупных заблокированных ресурсов (X/Twitter, независимые СМИ, Patreon, торрент-трекеры, NTC, Pornhub, LinkedIn)
-        # жестко фиксируем стратегию combo_tlsrec_tcpsplit, чтобы Thompson Sampling никогда не применял неэффективные техники.
-        if is_youtube or cluster == "google":
-            with self._lock:
-                net_scores = self._scores.setdefault(self._current_network, {})
-                key = self._get_composite_key(host, ip)
-                if key not in net_scores:
-                    net_scores[key] = self._init_domain_priors(self._get_domain_key(host), is_youtube=True)
-                net_scores[key]["combo_tlsrec_tcpsplit"] = [15.0, 1.0]
-                if "boringssl_split" in net_scores[key]:
-                    net_scores[key]["boringssl_split"] = [1.0, 5.0]
-            return "combo_tlsrec_tcpsplit"
-
-        if is_core_discord or is_media_discord or is_discord or is_major_blocked:
-            with self._lock:
-                net_scores = self._scores.setdefault(self._current_network, {})
-                key = self._get_composite_key(host, ip)
-                if key not in net_scores:
-                    net_scores[key] = self._init_domain_priors(self._get_domain_key(host), is_discord=True)
-                if "combo_tlsrec_tcpsplit" not in net_scores[key]:
-                    net_scores[key]["combo_tlsrec_tcpsplit"] = [12.0, 1.0]
-            return "combo_tlsrec_tcpsplit"
-
         if not self.enabled:
             return "combo_tlsrec_tcpsplit" if (is_youtube or is_core_discord) else "tcp_split_sni_mid"
 
@@ -896,7 +872,7 @@ class ThompsonStrategySelector:
                 excluded.update(["boringssl_split"])
             if is_core_discord:
                 # Для Core Discord на Cloudflare стабильно работает исключительно combo_tlsrec_tcpsplit
-                excluded.update(["direct", "boringssl_split", "tcp_split_sni_start", "tcp_split_sni_mid", "tls_record_frag", "fake_sni_record"])
+                excluded.update(["direct", "boringssl_split"])
             if is_media_discord:
                 # Для Discord Media исключаем несовместимые техники; tcp_split_sni_mid гарантированно блокируется ТСПУ на Cloudflare
                 excluded.update(["boringssl_split", "direct", "tcp_split_sni_mid"])
@@ -916,12 +892,21 @@ class ThompsonStrategySelector:
 
             best_strategy = available[0] if available else ("combo_tlsrec_tcpsplit" if (is_youtube or is_core_discord) else "tcp_split_sni_mid")
             max_sample = -1.0
+            # Для целевых сервисов без случайной разведки: новые техники пробуются в Fast-Fallback
+            # после реального сбоя, а основной выбор следует накопленным наблюдениям.
+            stable = is_whitelisted or is_youtube or is_discord or is_core_discord or is_media_discord or is_major_blocked
+            if stable:
+                available = sorted(available, key=lambda s: _STABLE_ORDER.index(s) if s in _STABLE_ORDER else len(_STABLE_ORDER))
 
             for strat_name in available:
                 if strat_name not in candidates:
                     continue
                 alpha, beta = candidates[strat_name]
-                sample = random.betavariate(max(0.1, alpha), max(0.1, beta))
+                if stable:
+                    # Затухшие оценки без наблюдений не должны выглядеть успешнее проверенной техники.
+                    sample = alpha / (alpha + beta) if alpha + beta >= 3.0 else 0.25
+                else:
+                    sample = random.betavariate(max(0.1, alpha), max(0.1, beta))
                 if sample > max_sample:
                     max_sample = sample
                     best_strategy = strat_name
@@ -996,7 +981,7 @@ class ThompsonStrategySelector:
 
         # Для Discord Media единственной рабочей техникой против ТСПУ на Cloudflare
         # является combo_tlsrec_tcpsplit (при сбое выполняется ротация IP, а не смена техники на блокируемую).
-        if is_media_dc:
+        if is_media_dc and "combo_tlsrec_tcpsplit" not in excluded_early:
             return "combo_tlsrec_tcpsplit"
 
         is_major_blocked = any(b in h_lower for b in MAJOR_BLOCKED_PATTERNS)
@@ -1150,6 +1135,9 @@ class ThompsonStrategySelector:
         is_calibration: bool = False
     ) -> None:
         """Фиксирует успешное соединение и ответ сервера с непрерывной RTT-наградой."""
+        if is_calibration:
+            logger.debug("Синтетическая TLS-проба %s: %s (не оценка загрузки)", host, strategy)
+            return
         if not host or not strategy or strategy == "http":
             return
 
@@ -1229,6 +1217,9 @@ class ThompsonStrategySelector:
         is_calibration: bool = False
     ) -> None:
         """Фиксирует сбой соединения. При подтвержденном ТСПУ налагается штраф."""
+        if is_calibration:
+            logger.debug("Синтетическая TLS-проба %s: %s (не оценка загрузки)", host, strategy)
+            return
         if not host or not strategy or strategy == "http":
             return
 

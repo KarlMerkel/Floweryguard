@@ -346,7 +346,7 @@ class TestFloweryV140Fixes(unittest.TestCase):
         p = DPIBypassProxy(cfg)
         test_host = "test-ram-cache-rotation.example"
         ip_pool = ["93.184.216.34", "93.184.216.35"]
-        _RESOLVED_IPS_CACHE.set(test_host, (time.time(), ip_pool))
+        _RESOLVED_IPS_CACHE.set(p._resolved_cache_key(test_host), (time.time(), ip_pool))
 
         getaddrinfo_called = []
 

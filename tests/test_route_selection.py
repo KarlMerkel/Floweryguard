@@ -25,7 +25,7 @@ class TestRouteSelection(unittest.TestCase):
         self.bad, self.good = '104.18.1.1', '104.18.2.1'
 
     def connect(self, candidates, port=443):
-        _RESOLVED_IPS_CACHE.set(self.host, (time.time(), candidates))
+        _RESOLVED_IPS_CACHE.set(self.proxy._resolved_cache_key(self.host), (time.time(), candidates))
         sock = MagicMock(spec=socket.socket)
         sock.connect_ex.return_value = 0
         with patch('flowguard.proxy.socket.socket', return_value=sock):
@@ -61,6 +61,34 @@ class TestRouteSelection(unittest.TestCase):
         self.assertEqual(self.connect([self.bad, self.good]), self.bad)
         self.proxy.strategy_engine._current_network = 'wifi'
         self.assertEqual(self.connect([self.bad, self.good], port=8443), self.bad)
+
+    def test_stalled_cloudflare_host_moves_to_proven_edge_of_same_network(self):
+        self.host = 'x.com'
+        dns_ip, other_edge = '162.159.140.229', '162.159.137.5'
+        self.proxy.route_health.record('wifi', 'discord.com', 443, other_edge, 'progress')
+        self.proxy.route_health.record('wifi', 'other.example', 443, '104.16.1.1', 'progress')
+        self.assertEqual(self.connect([dns_ip]), dns_ip)
+        self.proxy.route_health.record('wifi', self.host, 443, dns_ip, 'suspect')
+        self.assertIn(self.connect([dns_ip]), ('162.159.136.232', other_edge))
+        _WORKING_IP_CACHE.clear()
+        self.proxy.route_health.record('wifi', self.host, 443, '162.159.136.232', 'suspect')
+        # Узел из другой подсети Cloudflare может не обслуживать домен (403), его не подставляем.
+        self.assertEqual(self.connect([dns_ip]), other_edge)
+
+    def test_non_cloudflare_host_gets_no_foreign_edges(self):
+        self.host = 'soundcloud.com'
+        self.proxy.route_health.record('wifi', 'discord.com', 443, '162.159.136.232', 'progress')
+        self.proxy.route_health.record('wifi', self.host, 443, '52.84.150.39', 'suspect')
+        self.assertEqual(self.connect(['52.84.150.39']), '52.84.150.39')
+
+    def test_proven_ips_are_scoped_to_network_port_and_outcome(self):
+        health = RouteHealth()
+        health.record('wifi', 'a.example', 443, '162.159.1.1', 'progress')
+        health.record('wifi', 'b.example', 443, '162.159.2.2', 'suspect')
+        health.record('phone', 'c.example', 443, '162.159.3.3', 'progress')
+        health.record('wifi', 'd.example', 8443, '162.159.4.4', 'progress')
+        health.record('wifi', 'e.example', 443, '162.159.5.5', 'progress')
+        self.assertEqual(health.proven_ips('wifi', 443), ['162.159.5.5', '162.159.1.1'])
 
     def test_discord_initial_priority_yields_to_observed_stall(self):
         self.host = 'cdn.discordapp.com'

@@ -41,13 +41,13 @@ class TestDiscordConnectionAccounting(unittest.TestCase):
 
                     with patch("flowguard.proxy.select.select", side_effect=select_ready), \
                          patch("flowguard.proxy.time.time", side_effect=lambda: now[0]), \
-                         patch("flowguard.proxy.mark_ip_dead") as mark_dead, \
+                         patch.object(DPIBypassProxy, "_record_route_failure") as route_failure, \
                          patch("flowguard.proxy.mark_ip_working") as mark_working:
                         proxy._pipe_sockets(client, upstream, host="discord.com",
                                             strategy="combo_tlsrec_tcpsplit")
                     proxy.strategy_engine.record_success.assert_not_called()
                     mark_working.assert_not_called()
-                    mark_dead.assert_called_with(ip, duration=45.0)
+                    route_failure.assert_called_with("discord.com", 443, ip)
                     proxy.strategy_engine.record_failure.assert_called_with(
                         "discord.com", "combo_tlsrec_tcpsplit", ip=ip, is_tspu=False
                     )

@@ -300,8 +300,8 @@ class ThreadSafeBoundedCache:
 
 
 _FALLBACK_DNS_SERVERS = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "9.9.9.9", "77.88.8.8"]
-_DNS_CACHE = ThreadSafeBoundedCache(maxsize=1024)
-_RESOLVED_IPS_CACHE = ThreadSafeBoundedCache(maxsize=1024)
+_DNS_CACHE = ThreadSafeBoundedCache(maxsize=1024, default_ttl=300)
+_RESOLVED_IPS_CACHE = ThreadSafeBoundedCache(maxsize=1024, default_ttl=300)
 _WORKING_IP_CACHE = ThreadSafeBoundedCache(maxsize=1024)
 _DEAD_IP_CACHE = ThreadSafeBoundedCache(maxsize=2048)
 _IP_DEAD_STRIKES: Dict[str, int] = {}
@@ -595,6 +595,9 @@ DISCORD_CORE_ANYCAST_IPS: List[str] = [
     "162.159.136.232", "162.159.137.232", "162.159.138.232",
     "162.159.128.233", "162.159.129.233", "162.159.130.233"
 ]
+
+# Узел Cloudflare, на котором загрузка не обрывается после 16 КБ (Discord, X).
+CLOUDFLARE_VERIFIED_EDGE_IP = "162.159.136.232"
 
 DISCORD_CDN_ANYCAST_IPS: List[str] = [
     # Discord CDN Anycast (.232 - Head priority expected by tests and fast-path)
@@ -1253,6 +1256,28 @@ class DPIBypassProxy:
         with _SINGLE_FLIGHT_LOCK:
             _HOST_RESOLVE_LOCKS.clear()
 
+    def _resolved_cache_key(self, host):
+        """Адреса из DNS одной сети не переносятся в другую при смене профиля на лету."""
+        network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
+        return network, host.lower().rstrip('.')
+
+    def _cloudflare_alternatives(self, network, port, candidates):
+        """Узлы Cloudflare из той же /16, что и адреса из DNS: узел другой подсети может не обслуживать домен."""
+        prefixes = {ip.rsplit('.', 2)[0] for ip in candidates if ':' not in ip and is_cloudflare_anycast_ip(ip)}
+        if not prefixes:
+            return []
+        pool = [CLOUDFLARE_VERIFIED_EDGE_IP] + self.route_health.proven_ips(network, port)
+        return [ip for ip in dict.fromkeys(pool)
+                if ip not in candidates and ':' not in ip and is_cloudflare_anycast_ip(ip)
+                and ip.rsplit('.', 2)[0] in prefixes]
+
+    def _record_route_failure(self, host, port, ip, network=None):
+        if not getattr(self, "route_health", None):
+            self.route_health = RouteHealth()
+        if network is None:
+            network = getattr(getattr(self, "strategy_engine", None), "_current_network", "default")
+        self.route_health.record(network, host, port, ip, "suspect")
+
     def _connect_target(self, host: str, port: int, exclude_ip: Optional[Any] = None, target_ip: Optional[str] = None, timeout: Optional[float] = None) -> Optional[socket.socket]:
         """Устанавливает соединение с целевым сервером с авто-перебором IP, фильтрацией мертвых IP и Happy Eyeballs.
         
@@ -1310,11 +1335,13 @@ class DPIBypassProxy:
                 if is_discord_host(host):
                     _RECENT_DISCORD_IPS.set(cached_ip, time.time())
                 return fast_sock
-            mark_ip_dead(cached_ip, duration=30.0)
+            self._record_route_failure(host, port, cached_ip, network)
             _WORKING_IP_CACHE.pop(host, None)
 
+        resolve_key = self._resolved_cache_key(host)
+
         # 1.1 Zero-Latency RAM-кэш адресов: проверяем _RESOLVED_IPS_CACHE (минуя блокирующий getaddrinfo)
-        cached_entry = _RESOLVED_IPS_CACHE.get(host)
+        cached_entry = _RESOLVED_IPS_CACHE.get(resolve_key)
         if cached_entry:
             if isinstance(cached_entry, tuple) and len(cached_entry) == 2:
                 c_time, c_ips = cached_entry
@@ -1330,7 +1357,7 @@ class DPIBypassProxy:
         if not candidate_ips and not is_plain_ip(host):
             with _get_host_lock(host):
                 # Double-check кэш внутри блокировки
-                cached_entry = _RESOLVED_IPS_CACHE.get(host)
+                cached_entry = _RESOLVED_IPS_CACHE.get(resolve_key)
                 if cached_entry:
                     if isinstance(cached_entry, tuple) and len(cached_entry) == 2:
                         c_time, c_ips = cached_entry
@@ -1442,7 +1469,7 @@ class DPIBypassProxy:
                                     candidate_ips.append(fip)
 
                 if candidate_ips:
-                    _RESOLVED_IPS_CACHE.set(host, (time.time(), list(candidate_ips)))
+                    _RESOLVED_IPS_CACHE.set(resolve_key, (time.time(), list(candidate_ips)))
 
         # 4. Фильтруем заведомо мёртвые / сбрасывающие IP и исключенные адреса
         raw_candidates = [ip for ip in candidate_ips if (ipv6_enabled or ":" not in ip) and not is_bogon_or_sinkhole_ip(ip)]
@@ -1643,6 +1670,13 @@ class DPIBypassProxy:
                         rot = _DISCORD_IP_ROTATION_INDEX
                         candidate_ips = candidate_ips[rot:] + candidate_ips[:rot]
 
+        # Cloudflare обслуживает домен и на других узлах своей сети, а ТСПУ обрывает передачу
+        # лишь на части адресов: при зависании адресов из DNS пробуем узлы той же /16,
+        # через которые в этой сети уже прошли данные.
+        if health and not is_plain_ip(host):
+            candidate_ips += [ip for ip in self._cloudflare_alternatives(network, port, candidate_ips)
+                              if ip not in excluded_set and available(ip)]
+
         # Передача данных важнее доступности TCP и начального приоритета Anycast.
         if health:
             candidate_ips = health.rank(network, host, port, candidate_ips)
@@ -1670,7 +1704,7 @@ class DPIBypassProxy:
             except Exception:
                 if s:
                     _safe_close_socket(s)
-                mark_ip_dead(primary_ip, duration=30.0)
+                self._record_route_failure(host, port, primary_ip, network)
                 _WORKING_IP_CACHE.pop(host, None)
 
                 # Немедленный DoH Failover на случай мертвого / отравленного IP (local hosts, DNS poisoning)
@@ -1715,7 +1749,7 @@ class DPIBypassProxy:
                         except Exception:
                             if s_doh:
                                 _safe_close_socket(s_doh)
-                            mark_ip_dead(dip, duration=30.0)
+                            self._record_route_failure(host, port, dip, network)
 
                 # Резервная попытка через fallback DNS перед отказом
                 fallback_ip = resolve_fallback_dns(host, self.config)
@@ -1741,7 +1775,7 @@ class DPIBypassProxy:
                         except Exception:
                             if s2:
                                 _safe_close_socket(s2)
-                            mark_ip_dead(fallback_ip, duration=30.0)
+                            self._record_route_failure(host, port, fallback_ip, network)
                 return None
 
         # 6. Happy Eyeballs (RFC 8305): каскадный опрос нескольких IP с задержкой 120 мс
@@ -1780,8 +1814,7 @@ class DPIBypassProxy:
                     connecting[s] = (target_ip, t_conn)
                 else:
                     # Немедленный отказ (WSAECONNREFUSED 10061, WSAENETUNREACH и др.)
-                    dead_dur = 15.0 if (is_cloudflare_anycast_ip(target_ip) or is_discord_host(host)) else 60.0
-                    mark_ip_dead(target_ip, duration=dead_dur)
+                    self._record_route_failure(host, port, target_ip, network)
                     try:
                         s.close()
                     except Exception:
@@ -1805,8 +1838,7 @@ class DPIBypassProxy:
                 info = connecting.pop(es, None)
                 failed_ip = info[0] if isinstance(info, tuple) else info
                 if failed_ip:
-                    dead_dur = 15.0 if (is_cloudflare_anycast_ip(failed_ip) or is_discord_host(host)) else 60.0
-                    mark_ip_dead(failed_ip, duration=dead_dur)
+                    self._record_route_failure(host, port, failed_ip, network)
                 try:
                     es.close()
                 except Exception:
@@ -1850,8 +1882,7 @@ class DPIBypassProxy:
                     failed_info = connecting.pop(ws, None)
                     failed_ip = failed_info[0] if isinstance(failed_info, tuple) else failed_info
                     if failed_ip:
-                        dead_dur = 15.0 if (is_cloudflare_anycast_ip(failed_ip) or is_discord_host(host)) else 60.0
-                        mark_ip_dead(failed_ip, duration=dead_dur)
+                        self._record_route_failure(host, port, failed_ip, network)
                         if _WORKING_IP_CACHE.get(host) == failed_ip:
                             _WORKING_IP_CACHE.pop(host, None)
                     try:
@@ -1904,7 +1935,7 @@ class DPIBypassProxy:
                     failed_info = connecting.pop(ws, None)
                     failed_ip = failed_info[0] if isinstance(failed_info, tuple) else failed_info
                     if failed_ip:
-                        mark_ip_dead(failed_ip, duration=300.0)
+                        self._record_route_failure(host, port, failed_ip, network)
                         if _WORKING_IP_CACHE.get(host) == failed_ip:
                             _WORKING_IP_CACHE.pop(host, None)
                     try:
@@ -1959,7 +1990,7 @@ class DPIBypassProxy:
             except Exception:
                 if s_doh:
                     _safe_close_socket(s_doh)
-                mark_ip_dead(dip, duration=30.0)
+                self._record_route_failure(host, port, dip, network)
 
         return None
 
@@ -2017,6 +2048,28 @@ class DPIBypassProxy:
 
         return "silent_drop", None, delta_ms
 
+    def _fixed_strategy(self, host):
+        """Стратегия, которую не меняют ни обучение, ни Fast-Fallback; None — выбор адаптивный."""
+        config = getattr(self, "config", None)
+        if config is None:
+            return None
+        if is_gaming_host(host) or is_telegram_host(host):
+            return "direct"
+        is_discord = is_discord_host(host)
+        is_youtube = is_google_or_youtube_host(host.lower())
+        if config.only_target_domains and not (is_discord or is_youtube):
+            with self._whitelist_lock:
+                if not is_host_in_whitelist(host, self.whitelist_domains):
+                    return "direct"
+        if not config.auto_strategy:
+            strategy = config.default_strategy
+            if is_youtube:
+                strategy = "combo_tlsrec_tcpsplit"
+            elif not is_discord and strategy in ("disoob_sni", "boringssl_split", "dummy_record_prepend"):
+                strategy = "tcp_split_sni_mid"
+            return self.strategy_engine.allowed_strategy(strategy)
+        return None
+
     def _send_tls_client_hello_with_bypass(
         self,
         target_sock: socket.socket,
@@ -2053,24 +2106,22 @@ class DPIBypassProxy:
         is_discord = is_discord_host(sni_name) or is_discord_host(target_host)
         is_youtube = is_google_or_youtube_host(lower_host) or is_google_or_youtube_host(lower_sni)
 
-        if is_gaming_host(sni_name) or is_gaming_host(target_host) or is_telegram_host(sni_name) or is_telegram_host(target_host):
-            target_sock.sendall(data)
-            return "direct", sni_name
-        if self.config.only_target_domains and not (is_whitelisted or is_discord or is_youtube):
-            target_sock.sendall(data)
-            return "direct", sni_name
+        fixed = self._fixed_strategy(sni_name)
+        if fixed is not None:
+            self._safe_execute_strategy(fixed, target_sock, data, host=sni_name)
+            return fixed, sni_name
 
-        # Тандем с zapret: при активном winws.exe используем чистый direct
-        # ТОЛЬКО если winws реально подтвердил перехват TCP трафик (порт 443)!
-        # Для Discord всегда сохраняем высокоэффективный TLS десинк Flowery.
+        # Тандем с zapret: первая попытка без десинка Flowery, чтобы не было двойного десинка.
+        # Если zapret сайт не пробил, Fast-Fallback переходит к обходу Flowery.
+        # Для Discord всегда сохраняем TLS-десинк Flowery.
         try:
-            if not is_discord and is_winws_tcp_filtering_active(strict=True):
-                target_sock.sendall(data)
-                return "direct", sni_name
+            winws_tcp = not is_discord and is_winws_tcp_filtering_active(strict=True)
         except Exception:
-            pass
+            winws_tcp = False
+        if winws_tcp:
+            target_sock.sendall(data)
+            return "direct", sni_name
 
-        # Техника 5: Fake Whitelisted SNI Desync (только если явно включено и не для Discord)
         if self.config.whitelist_fake_sni_record and not is_discord:
             if self.sni_spoofer.send_with_fake_sni_desync(target_sock, data):
                 return "fake_sni_record", sni_name
@@ -2078,25 +2129,13 @@ class DPIBypassProxy:
             return "direct", sni_name
 
         # Движок адаптивных стратегий (Thompson Sampling в стиле Nova)
-        if self.config.auto_strategy:
-            strategy = self.strategy_engine.select_strategy(
-                sni_name,
-                is_youtube=is_youtube,
-                is_discord=is_discord,
-                ip=ip,
-                is_whitelisted=is_whitelisted
-            )
-            self._safe_execute_strategy(strategy, target_sock, data, host=sni_name)
-            return strategy, sni_name
-
-        # Ручные/статические режимы без автоподбора:
-        strategy = self.config.default_strategy
-        if is_youtube:
-            strategy = "combo_tlsrec_tcpsplit"
-        elif not is_discord and strategy in ("disoob_sni", "boringssl_split", "dummy_record_prepend"):
-            strategy = "tcp_split_sni_mid"
-
-        strategy = self.strategy_engine.allowed_strategy(strategy)
+        strategy = self.strategy_engine.select_strategy(
+            sni_name,
+            is_youtube=is_youtube,
+            is_discord=is_discord,
+            ip=ip,
+            is_whitelisted=is_whitelisted
+        )
         self._safe_execute_strategy(strategy, target_sock, data, host=sni_name)
         return strategy, sni_name
 
@@ -2136,6 +2175,7 @@ class DPIBypassProxy:
         strat1, effective_host = self._send_tls_client_hello_with_bypass(
             current_sock, first_packet, target_host, ip=current_ip
         )
+        fixed_strategy = self._fixed_strategy(effective_host)
         t_send1 = time.time()
 
         is_dc = is_discord_host(effective_host)
@@ -2207,6 +2247,8 @@ class DPIBypassProxy:
             is_tspu=is_tspu,
             is_whitelisted=is_wl
         )
+        if fixed_strategy is not None:
+            strat2 = fixed_strategy
         if is_gm:
             strat2 = "direct"
             skip_attempt2_fast_path = False
@@ -2231,7 +2273,7 @@ class DPIBypassProxy:
                     if status2 == "success":
                         return sock2, strat2, effective_host, resp2
                 _safe_close_socket(sock2)
-                record_ip_strategy_failure(current_ip, strat2)
+                self._record_route_failure(effective_host, target_port, meta2.get("target_ip", current_ip))
 
         # Попытка 3: ДРУГОЙ живой IP
         if is_dc or is_yt or is_whitelisted:
@@ -2247,7 +2289,7 @@ class DPIBypassProxy:
         if not new_sock:
             target_err_ip = current_ip
             if target_err_ip:
-                mark_ip_dead(target_err_ip, duration=30.0)
+                self._record_route_failure(effective_host, target_port, target_err_ip)
             return None, strat1, effective_host, None
 
         meta_new = _get_socket_meta(new_sock)
@@ -2279,7 +2321,7 @@ class DPIBypassProxy:
             f"(IP: {current_ip} -> {new_ip})"
         )
 
-        strat3 = self.strategy_engine.allowed_strategy(strat3)
+        strat3 = self.strategy_engine.allowed_strategy(fixed_strategy if fixed_strategy is not None else strat3)
         t_send3 = time.time()
         if not self._safe_execute_strategy(strat3, new_sock, first_packet, host=effective_host):
             _safe_close_socket(new_sock)
@@ -2557,7 +2599,7 @@ class DPIBypassProxy:
                                 if host and strategy and strategy not in ("direct", "http"):
                                     self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
                                 if target_ip:
-                                    mark_ip_dead(target_ip, duration=45.0)
+                                    self._record_route_failure(host, target_port, target_ip)
                                     _RECENT_DISCORD_IPS.set(target_ip, time.time())
                         elif host and strategy and strategy not in ("direct", "http"):
                             self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
@@ -2592,7 +2634,7 @@ class DPIBypassProxy:
                             if host and strategy and strategy not in ("direct", "http"):
                                 self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
                             if target_ip:
-                                mark_ip_dead(target_ip, duration=45.0)
+                                self._record_route_failure(host, target_port, target_ip)
                                 _RECENT_DISCORD_IPS.set(target_ip, time.time())
                         elif host and strategy and strategy not in ("direct", "http"):
                             self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
@@ -2651,7 +2693,7 @@ class DPIBypassProxy:
                                         if host and strategy and strategy not in ("direct", "http"):
                                             self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
                                         if target_ip:
-                                            mark_ip_dead(target_ip, duration=45.0)
+                                            self._record_route_failure(host, target_port, target_ip)
                                             _RECENT_DISCORD_IPS.set(target_ip, now)
                                     else:
                                         client_closed_normally = True
@@ -2805,7 +2847,7 @@ class DPIBypassProxy:
                                 if host and strategy and strategy not in ("direct", "http"):
                                     self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
                                 if target_ip:
-                                    mark_ip_dead(target_ip, duration=30.0)
+                                    self._record_route_failure(host, target_port, target_ip)
                                     _RECENT_DISCORD_IPS.set(target_ip, now)
                             elif got_initial_response and not client_sent_app_data:
                                 client_closed_normally = True
@@ -2832,7 +2874,7 @@ class DPIBypassProxy:
                                 if host and strategy and strategy not in ("direct", "http"):
                                     self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
                                 if target_ip:
-                                    mark_ip_dead(target_ip, duration=45.0)
+                                    self._record_route_failure(host, target_port, target_ip)
                                     _RECENT_DISCORD_IPS.set(target_ip, now)
                             else:
                                 client_closed_normally = True
@@ -2862,7 +2904,7 @@ class DPIBypassProxy:
                         if host and strategy and strategy not in ("direct", "http"):
                             self.strategy_engine.record_failure(host, strategy, ip=target_ip, is_tspu=False)
                         if target_ip:
-                            mark_ip_dead(target_ip, duration=45.0)
+                            self._record_route_failure(host, target_port, target_ip)
                             _RECENT_DISCORD_IPS.set(target_ip, time.time())
             elif not is_client_stalled_abort and (not has_socket_error or client_closed_normally) and (client_closed_normally or total_server_bytes > 0 or server_replied_app_data) and not is_error_response:
                 # Сессия завершилась штатно или данные получены: подтверждаем успех, если не был подтвержден ранее

@@ -31,8 +31,16 @@ class TestTlsRouteProgress(unittest.TestCase):
         upstream.recv.return_value = response
         events = iter([(0, client), (1, upstream), (end_time, client), (end_time + 15, None)])
         now = [0]
+        delivered = {client: [], upstream: []}
+        for destination in (client, upstream):
+            def send(data, destination=destination):
+                delivered[destination].append(bytes(data))
+                return len(data)
+            destination.send.side_effect = send
 
         def ready(*args):
+            if args[1]:
+                return [], args[1], []
             now[0], sock = next(events)
             return ([sock] if sock is not None else []), [], []
 
@@ -42,8 +50,8 @@ class TestTlsRouteProgress(unittest.TestCase):
             self.proxy._pipe_sockets(client, upstream, host=host, strategy='combo_tlsrec_tcpsplit',
                                      got_initial_response=True, tls_tunnel=True, route_network=route_network)
         dead.assert_not_called()
-        client.sendall.assert_called_once_with(response)
-        upstream.sendall.assert_called_once_with(request)
+        self.assertEqual(b''.join(delivered[client]), response)
+        self.assertEqual(b''.join(delivered[upstream]), request)
         return self.proxy.route_health.status('wifi', host, 443, ip)
 
     def test_plateau_is_not_rewarded_and_next_route_is_deprioritized(self):

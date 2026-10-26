@@ -74,7 +74,7 @@ class TestSpeedOptimizations(unittest.TestCase):
         """Проверка: при наличии домена в _RESOLVED_IPS_CACHE системный getaddrinfo не вызывается."""
         host = "cached-domain.com"
         test_ip = "192.0.2.1"
-        _RESOLVED_IPS_CACHE.set(host, (time.time(), [test_ip]))
+        _RESOLVED_IPS_CACHE.set(self.proxy._resolved_cache_key(host), (time.time(), [test_ip]))
 
         with patch("socket.getaddrinfo") as mock_gai, \
              patch.object(self.proxy, "_try_direct_connect", return_value=None):
