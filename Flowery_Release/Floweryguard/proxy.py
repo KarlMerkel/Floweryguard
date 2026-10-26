@@ -1090,7 +1090,11 @@ class DPIBypassProxy:
                 client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
                 # Читаем первый пакет рукопожатия от клиента (TLS ClientHello)
-                first_packet = client_sock.recv(self.buffer_size)
+                # Заголовки CONNECT и начало туннеля могут прийти одним чтением.
+                separator = b"\r\n\r\n" if b"\r\n\r\n" in raw_req else b"\n\n"
+                first_packet = raw_req.partition(separator)[2]
+                if not first_packet:
+                    first_packet = client_sock.recv(self.buffer_size)
                 if not first_packet:
                     return
 

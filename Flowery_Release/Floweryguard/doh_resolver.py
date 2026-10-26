@@ -552,35 +552,9 @@ class DoHResolver:
     def _get_ssl_context(self) -> ssl.SSLContext:
         if self._ssl_context is not None:
             return self._ssl_context
-        # 1. Попытка использовать certifi при его наличии
-        try:
-            import certifi
-            self._ssl_context = ssl.create_default_context(cafile=certifi.where())
-            return self._ssl_context
-        except Exception as e:
-            logger.debug("certifi unavailable: %s", e)
-
-        # 2. Использование системного хранилища сертификатов Windows
-        try:
-            ctx = ssl.create_default_context()
-            if sys.platform == "win32":
-                for store in ("ROOT", "CA"):
-                    try:
-                        for cert, encoding, trust in ssl.enum_certificates(store):
-                            try:
-                                ctx.load_verify_locations(cadata=cert)
-                            except Exception as ce:
-                                logger.debug("Could not load cert data from %s: %s", store, ce)
-                    except Exception as se:
-                        logger.debug("enum_certificates failed for %s: %s", store, se)
-        except Exception as e:
-            logger.debug("System cert context creation failed: %s", e)
-            ctx = ssl.create_default_context()
-
-        # Для доверенных публичных Anycast DoH провайдеров (подключение строго к фиксированным литеральным IP)
-        # отключаем отказ при отсутствии промежуточных сертификатов Windows, гарантируя постоянное TLS 1.3 шифрование
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        # Проверяем цепочку доверия и имя DoH/DoT-сервера системным хранилищем.
+        # Фиксированный IP не защищает от подмены сервера на сетевом маршруте.
+        ctx = ssl.create_default_context()
         self._ssl_context = ctx
         return self._ssl_context
 
