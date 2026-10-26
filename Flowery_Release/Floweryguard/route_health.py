@@ -1,0 +1,89 @@
+"""Наблюдения о передаче данных отдельно от успешного TLS-рукопожатия."""
+
+from collections import OrderedDict
+import threading
+import time
+
+
+class TransferProgress:
+    """Зашифрованный поток: объём доказывает прогресс, но не полноту HTTP-ответа."""
+
+    def __init__(self):
+        self.client_bytes = 0
+        self.server_bytes = 0
+        self.last_received = 0.0
+        self.client_closed_at = None
+        self.first_sent = None
+
+    def sent(self, count, now=0.0):
+        if self.first_sent is None and count:
+            self.first_sent = now
+        self.client_bytes += count
+
+    def received(self, count, now):
+        self.server_bytes += count
+        self.last_received = now
+
+    @property
+    def proven(self):
+        return self.server_bytes >= 65536
+
+    def finish(self, reason, now):
+        if self.proven:
+            return 'progress'
+        if reason == 'client_eof' and self.client_closed_at is not None:
+            now = self.client_closed_at
+        waiting_since = self.last_received if self.server_bytes else self.first_sent
+        # Это повод сменить приоритет следующего соединения, а не доказательство DPI.
+        # Короткие ответы и отмены не штрафуют стратегию или IP других доменов.
+        if (reason in ('client_eof', 'client_reset', 'idle_timeout')
+                and (self.server_bytes == 0 or 6144 <= self.server_bytes < 32768)
+                and 0 < self.client_bytes < 32768
+                and waiting_since is not None and now - waiting_since >= 3.0):
+            return 'suspect'
+        return 'unknown'
+
+
+class RouteHealth:
+    """Ограниченный потокобезопасный кэш наблюдений по сети, хосту, порту и IP."""
+
+    def __init__(self, clock=time.monotonic, max_entries=1024):
+        self._clock = clock
+        self._max_entries = max_entries
+        self._entries = OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(network, host, port, ip):
+        return network, host.lower().rstrip('.'), port, ip
+
+    def record(self, network, host, port, ip, outcome):
+        if not ip or outcome not in ('progress', 'suspect'):
+            return
+        key = self._key(network, host, port, ip)
+        expires = self._clock() + (300.0 if outcome == 'progress' else 45.0)
+        with self._lock:
+            self._entries[key] = (outcome, expires)
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+    def status(self, network, host, port, ip):
+        key = self._key(network, host, port, ip)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return 'unknown'
+            if self._clock() >= entry[1]:
+                del self._entries[key]
+                return 'unknown'
+            return entry[0]
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+
+    def rank(self, network, host, port, candidates):
+        """Стабильный порядок: передавшие данные, неизвестные, подозрительные."""
+        priority = {'progress': 0, 'unknown': 1, 'suspect': 2}
+        return sorted(candidates, key=lambda ip: priority[self.status(network, host, port, ip)])
