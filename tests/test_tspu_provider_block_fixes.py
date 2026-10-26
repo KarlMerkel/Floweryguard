@@ -322,6 +322,7 @@ class TestTSPUProviderBlockFixes(unittest.TestCase):
         from flowguard.proxy import mark_ip_working, _WORKING_IP_CACHE
         yt_ip = "142.251.150.4"
         mark_ip_working(yt_ip, "www.youtube.com")
+        self.proxy.route_health.record(self.proxy.strategy_engine._current_network, 'www.youtube.com', 443, yt_ip, 'progress')
         self.assertEqual(_WORKING_IP_CACHE.get("www.youtube.com"), yt_ip)
 
         # Fast-path does not pop it

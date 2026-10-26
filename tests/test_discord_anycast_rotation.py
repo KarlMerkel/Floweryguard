@@ -331,6 +331,7 @@ class TestDiscordAnycastRotationAndTrapFixes(unittest.TestCase):
         host = "discord.com"
         working_ip = "162.159.136.232"
         _WORKING_IP_CACHE.set(host, working_ip, ttl=15.0)
+        self.proxy.route_health.record(self.proxy.strategy_engine._current_network, host, 443, working_ip, 'progress')
 
         mock_direct = MagicMock(return_value=MagicMock())
         with patch.object(self.proxy, "_try_direct_connect", mock_direct):

@@ -31,6 +31,7 @@ class TestPerformanceOptimizations(unittest.TestCase):
         host = "fast.example.com"
         known_ip = "198.51.100.55"
         mark_ip_working(known_ip, host)
+        self.proxy.route_health.record(self.proxy.strategy_engine._current_network, host, 443, known_ip, 'progress')
 
         fake_sock = MagicMock(spec=socket.socket)
         mock_try_direct.return_value = fake_sock
@@ -49,6 +50,7 @@ class TestPerformanceOptimizations(unittest.TestCase):
         host = "stale.example.com"
         stale_ip = "198.51.100.99"
         mark_ip_working(stale_ip, host)
+        self.proxy.route_health.record(self.proxy.strategy_engine._current_network, host, 443, stale_ip, 'progress')
 
         # Прямое подключение к stale IP сбоит
         mock_try_direct.return_value = None

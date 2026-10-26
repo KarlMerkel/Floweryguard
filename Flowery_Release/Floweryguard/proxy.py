@@ -21,6 +21,8 @@ import os
 import struct
 import queue
 import weakref
+from .route_health import RouteHealth
+from .tls_transport import relay_tls
 from typing import Optional, Tuple, List, Dict, Any, Set
 try:
     from flowguard.config import Config, load_whitelist_domains, is_host_in_whitelist
@@ -799,6 +801,7 @@ class DPIBypassProxy:
 
     def __init__(self, config: Config):
         self.config = config
+        self.route_health = RouteHealth()
         self.host = config.proxy_host
         self.port = config.proxy_port
         self.buffer_size = config.buffer_size
@@ -1086,6 +1089,7 @@ class DPIBypassProxy:
                     target_host = target
                     target_port = 443
 
+                route_network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
                 target_sock = self._connect_target(target_host, target_port)
                 if not target_sock:
                     try:
@@ -1148,7 +1152,9 @@ class DPIBypassProxy:
                     target_sock,
                     host=effective_host,
                     strategy=strat_used,
-                    got_initial_response=bool(init_resp)
+                    got_initial_response=bool(init_resp),
+                    tls_tunnel=is_tls_client_hello(first_packet), target_port=target_port,
+                    route_network=route_network
                 )
 
             else:
@@ -1318,6 +1324,8 @@ class DPIBypassProxy:
                 excluded_set.add(str(exclude_ip))
 
         conn_to = timeout if timeout is not None else min(5.0, float(self.timeout))
+        health = getattr(self, 'route_health', None)
+        network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
 
         # 1. Zero-Latency Fast-Path: проверяем кэш известных рабочих IP
         cached_ip = _WORKING_IP_CACHE.get(host)
@@ -1337,6 +1345,8 @@ class DPIBypassProxy:
                 cached_ip = None
         if cached_ip and is_ip_dead(cached_ip):
             _WORKING_IP_CACHE.pop(host, None)
+            cached_ip = None
+        if cached_ip and health and health.status(network, host, port, cached_ip) != 'progress':
             cached_ip = None
         if cached_ip and cached_ip not in excluded_set and not is_ip_dead(cached_ip):
             fast_sock = self._try_direct_connect(cached_ip, port, timeout=min(2.0, conn_to))
@@ -1676,6 +1686,10 @@ class DPIBypassProxy:
                         _DISCORD_IP_ROTATION_INDEX = (_DISCORD_IP_ROTATION_INDEX + 1) % len(candidate_ips)
                         rot = _DISCORD_IP_ROTATION_INDEX
                         candidate_ips = candidate_ips[rot:] + candidate_ips[:rot]
+
+        # Передача данных важнее доступности TCP и начального приоритета Anycast.
+        if health:
+            candidate_ips = health.rank(network, host, port, candidate_ips)
 
         # 5. Если кандидат всего один - прямое подключение
         if len(candidate_ips) == 1:
@@ -2176,8 +2190,6 @@ class DPIBypassProxy:
         is_tspu = False
 
         if status1 == "success":
-            if (effective_host not in ("discord.com", "gateway.discord.gg") and not effective_host.endswith(".discord.gg") and not effective_host.endswith(".discord.com")) or is_discord_media_host(effective_host):
-                mark_ip_working(current_ip, effective_host)
             if self.shadow_prober:
                 self.shadow_prober.maybe_enqueue(effective_host, ip=current_ip)
             return current_sock, strat1, effective_host, resp1
@@ -2258,8 +2270,6 @@ class DPIBypassProxy:
                     strat2_executed = True
                     status2, resp2, delta_ms2 = self._probe_socket_response(sock2, t_send2, base_rtt2, strat2, probe_timeout=timeout2)
                     if status2 == "success":
-                        if (effective_host not in ("discord.com", "gateway.discord.gg") and not effective_host.endswith(".discord.gg") and not effective_host.endswith(".discord.com")) or is_discord_media_host(effective_host):
-                            mark_ip_working(current_ip, effective_host)
                         return sock2, strat2, effective_host, resp2
                 _safe_close_socket(sock2)
                 record_ip_strategy_failure(current_ip, strat2)
@@ -2322,8 +2332,6 @@ class DPIBypassProxy:
             timeout3 = min(remaining_budget() * 0.50, max(adaptive_floor3, min(1.20, base_rtt_new * 2.5 + 0.25)))
         status3, resp3, _ = self._probe_socket_response(new_sock, t_send3, base_rtt_new, strat3, probe_timeout=timeout3)
         if status3 == "success":
-            if (effective_host not in ("discord.com", "gateway.discord.gg") and not effective_host.endswith(".discord.gg") and not effective_host.endswith(".discord.com")) or is_discord_media_host(effective_host):
-                mark_ip_working(new_ip, effective_host)
             return new_sock, strat3, effective_host, resp3
         _safe_close_socket(new_sock)
         return None, strat3, effective_host, None
@@ -2430,13 +2438,64 @@ class DPIBypassProxy:
 
         return host.strip().rstrip("."), port, path
 
+    def _pipe_tls(self, client_sock, target_sock, host, strategy, port, long_lived, network):
+        """Учитывает прогресс TLS отдельно от HTTP-статуса, который прокси не видит."""
+        target_ip = _get_socket_meta(target_sock).get('target_ip')
+        if not target_ip:
+            try:
+                target_ip = target_sock.getpeername()[0]
+            except OSError:
+                target_ip = None
+        suspect_recorded = False
+
+        def account(direction, count):
+            if direction == 'rx':
+                self.bytes_rx += count
+            else:
+                self.bytes_tx += count
+
+        def record_progress():
+            self.route_health.record(network, host, port, target_ip, 'progress')
+            # Старое соединение не должно обучать новую сеть после смены профиля.
+            if network != getattr(self.strategy_engine, '_current_network', 'default'):
+                return
+            mark_ip_working(target_ip, host)
+            if host and strategy and strategy not in ('direct', 'http'):
+                self.strategy_engine.record_success(host, strategy, ip=target_ip)
+
+        def record_suspect(progress, reason):
+            nonlocal suspect_recorded
+            if suspect_recorded or long_lived:
+                return
+            suspect_recorded = True
+            self.route_health.record(network, host, port, target_ip, 'suspect')
+            logger.info(
+                '[Маршрут] %s:%s через %s: нет прогресса после %s байт (%s); '
+                'приоритет адреса временно снижен для новых соединений',
+                host, port, target_ip, progress.server_bytes, reason)
+
+        try:
+            progress, reason = relay_tls(
+                client_sock, target_sock, lambda: self.is_running, float(self.timeout),
+                self.buffer_size, account, record_progress, long_lived=long_lived,
+                on_suspect=record_suspect)
+            outcome = progress.finish(reason, time.monotonic())
+            if outcome == 'suspect':
+                record_suspect(progress, reason)
+        finally:
+            _safe_close_socket(client_sock)
+            _safe_close_socket(target_sock)
+
     def _pipe_sockets(
         self,
         client_sock: socket.socket,
         target_sock: socket.socket,
         host: str = "",
         strategy: str = "",
-        got_initial_response: bool = False
+        got_initial_response: bool = False,
+        tls_tunnel: bool = False,
+        target_port: int = 443,
+        route_network: Optional[str] = None
     ) -> None:
         """Двунаправленная надёжная пересылка трафика между клиентом и целевым сервером."""
         h_clean = (host or "").split(":")[0].lower()
@@ -2461,6 +2520,11 @@ class DPIBypassProxy:
         )
         is_tg = is_telegram_host(host) or is_telegram_host(h_clean)
         is_long_lived = is_ws or is_tg
+
+        if tls_tunnel:
+            network = route_network if route_network is not None else getattr(self.strategy_engine, '_current_network', 'default')
+            self._pipe_tls(client_sock, target_sock, host, strategy, target_port, is_long_lived, network)
+            return
 
         pipe_timeout = 3600.0 if is_long_lived else 60.0
         try:

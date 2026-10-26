@@ -73,5 +73,6 @@ class TestDiscordMediaPrimary(unittest.TestCase):
             with self.subTest(host=host):
                 self.clear_caches()
                 alternative = '162.159.130.233'
+                self.proxy.route_health.record(self.proxy.strategy_engine._current_network, host, 443, alternative, 'progress')
                 _WORKING_IP_CACHE.set(host, alternative)
                 self.assertEqual(self.connect(host), alternative)

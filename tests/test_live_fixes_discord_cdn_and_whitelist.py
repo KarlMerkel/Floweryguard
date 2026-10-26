@@ -88,8 +88,8 @@ class TestDiscordCDNAndWhitelistFixes(unittest.TestCase):
         with patch("time.time", return_value=time.time() + 305.0):
             self.assertIsNone(_WORKING_IP_CACHE.get(host))
 
-    def test_discord_media_probe_warms_cache_immediately(self):
-        """При успешном рукопожатии Discord CDN сразу прогревает кэш для параллельных потоков аватарок."""
+    def test_discord_media_probe_waits_for_transfer_before_caching(self):
+        """Рукопожатие CDN ещё не подтверждает передачу аватарок."""
         client_sock = MagicMock()
         mock_sock = MagicMock()
         target_ip = "162.159.130.233"
@@ -102,7 +102,7 @@ class TestDiscordCDNAndWhitelistFixes(unittest.TestCase):
                 client_sock, mock_sock, "cdn.discordapp.com", 443, b"\x16\x03\x01\x00\x10"
             )
         self.assertIsNotNone(res_sock)
-        self.assertEqual(_WORKING_IP_CACHE.get("cdn.discordapp.com"), target_ip)
+        self.assertIsNone(_WORKING_IP_CACHE.get("cdn.discordapp.com"))
 
     def test_discord_core_ttl_300s(self):
         """Для Discord Core (discord.com) TTL кэша рабочих IP также устанавливается в 300 секунд."""

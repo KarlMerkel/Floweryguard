@@ -165,6 +165,7 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
         node_ip = "173.194.181.36"
         host1 = "rr1---sn-4g5ednks.googlevideo.com"
         mark_ip_working(node_ip, host1)
+        self.proxy.route_health.record(self.proxy.strategy_engine._current_network, host1, 443, node_ip, 'progress')
 
         # Должен быть закэширован конкретный FQDN host, но НЕ generic 'googlevideo.com'
         self.assertEqual(_WORKING_IP_CACHE.get(host1), node_ip)
