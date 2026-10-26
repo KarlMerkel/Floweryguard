@@ -166,6 +166,16 @@ def build_custom_provider(
     )
 
 
+def provider_from_config(config) -> DoHProvider:
+    """Возвращает сохранённый провайдер, включая пользовательские URL и адреса."""
+    server = config.dns_server.strip()
+    for key, provider in DNS_PRESETS.items():
+        if server.lower() in (key, provider.name.lower()):
+            return provider
+    return build_custom_provider(config.dns_doh_name or server, config.dns_doh_url,
+                                 [ip for ip in (config.dns_primary, config.dns_secondary) if ip])
+
+
 def extract_san_domain(der_bytes: bytes) -> Optional[str]:
     """Извлекает первое валидное доменное имя (dNSName) из расширения SAN сертификата."""
     san_oid = b"\x55\x1d\x11"
@@ -906,8 +916,8 @@ class MultiDoHHarvester:
 
     def __init__(self, providers: Optional[Any] = None, timeout: float = 3.0):
         if providers is not None and not isinstance(providers, (list, tuple, set)):
-            timeout = getattr(providers, "timeout", timeout)
-            providers = None
+            config = providers
+            providers = [provider_from_config(config)] if getattr(config, "enable_custom_dns", False) else None
         if not providers:
             providers = [
                 DNS_PRESETS["cloudflare"],
@@ -945,10 +955,13 @@ class MultiDoHHarvester:
             threads.append(t)
             t.start()
 
+        deadline = time.monotonic() + self.timeout + 0.5
         for t in threads:
-            t.join(timeout=self.timeout + 0.5)
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
 
-        if results:
-            self._cache.set(f"{domain_clean}:{qtype}", results, 600)
-        return results
+        with lock:
+            snapshot = list(results)
+        if snapshot:
+            self._cache.set(f"{domain_clean}:{qtype}", snapshot, 600)
+        return snapshot
 

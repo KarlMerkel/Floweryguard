@@ -219,6 +219,7 @@ class TestDiscordGifsAndBlockedSitesFixes(unittest.TestCase):
         handler.timeout = 5.0
         handler.strategy_engine = MagicMock()
         handler.strategy_engine.get_fallback_strategy.return_value = "tcp_split_sni_mid"
+        handler.strategy_engine.allowed_strategy.side_effect = lambda name: name
         handler._connect_target = MagicMock(return_value=MagicMock())
         handler._safe_execute_strategy = MagicMock(return_value=True)
         handler._whitelist_lock = MagicMock()

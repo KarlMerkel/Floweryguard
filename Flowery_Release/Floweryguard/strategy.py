@@ -10,6 +10,7 @@ import random
 import socket
 import time
 import threading
+import uuid
 import sys
 from typing import Dict, List, Optional, Callable, Set, Iterable, Any
 
@@ -350,6 +351,7 @@ class ThompsonStrategySelector:
     def __init__(self, enabled: bool = True, cache_file: Optional[str] = None, scores_file: Optional[str] = None):
         self.enabled = enabled
         self._lock = threading.RLock()
+        self._save_lock = threading.Lock()
         self._current_network: str = "default"
         # {network_id: {composite_key: {strategy_name: [alpha, beta]}}}
         self._scores: Dict[str, Dict[str, Dict[str, List[float]]]] = {"default": {}}
@@ -533,6 +535,10 @@ class ThompsonStrategySelector:
             return self._get_network_champion_locked()
 
     def save_scores(self, force: bool = False) -> None:
+        with self._save_lock:
+            self._save_scores(force)
+
+    def _save_scores(self, force: bool = False) -> None:
         """Атомарно сохраняет накопленную статистику обучения в JSON-файл."""
         now = time.time()
         with self._lock:
@@ -570,12 +576,15 @@ class ThompsonStrategySelector:
             return
 
         try:
-            tmp_path = self.cache_file + ".tmp"
+            tmp_path = self.cache_file + "." + uuid.uuid4().hex + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, indent=2, ensure_ascii=False)
             os.replace(tmp_path, self.cache_file)
         except Exception as e:
             logger.error("Failed to save strategy scores to %s: %s", self.cache_file, e)
+            with self._lock:
+                self._dirty = True
+                self._last_save = 0.0
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
@@ -773,7 +782,21 @@ class ThompsonStrategySelector:
         self._trim_capacity_locked()
         return self._init_domain_priors(domain, is_youtube, is_discord)
 
-    def select_strategy(
+    def allowed_strategy(self, preferred: str) -> str:
+        """Применяет ограничения техник ко всем специальным веткам выбора."""
+        aliases = {"disoob_sni", "dummy_record_prepend", "mixed_case_tcpsplit", "tcp_overlap_sni", "tls_padding_split"}
+        effective = "tcp_split_sni_mid" if preferred in aliases else preferred
+        with self._lock:
+            allowed = self._allowed_strategies
+            if allowed is None or effective in allowed:
+                return preferred
+            return next((name for name in ALL_STRATEGIES if name in allowed), "direct")
+
+    def select_strategy(self, host: str, is_youtube: bool = False, is_discord: bool = False,
+                        ip: Optional[str] = None, is_whitelisted: bool = False) -> str:
+        return self.allowed_strategy(self._select_strategy(host, is_youtube, is_discord, ip, is_whitelisted))
+
+    def _select_strategy(
         self,
         host: str,
         is_youtube: bool = False,
@@ -921,7 +944,14 @@ class ThompsonStrategySelector:
 
             return best_strategy
 
-    def get_fallback_strategy(
+    def get_fallback_strategy(self, host: str, failed_strategy: str = "", is_youtube: bool = False,
+                              is_discord: bool = False, ip: Optional[str] = None,
+                              failed_strategies: Optional[Iterable[str]] = None,
+                              is_tspu: bool = True, is_whitelisted: bool = False) -> str:
+        return self.allowed_strategy(self._get_fallback_strategy(
+            host, failed_strategy, is_youtube, is_discord, ip, failed_strategies, is_tspu, is_whitelisted))
+
+    def _get_fallback_strategy(
         self,
         host: str,
         failed_strategy: str = "",

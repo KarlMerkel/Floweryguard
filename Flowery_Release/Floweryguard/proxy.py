@@ -565,9 +565,10 @@ def get_dns_failover_manager(config=None, force_new: bool = False):
                     primary = v
                     break
         if not primary:
-            primary = DNS_PRESETS.get("cloudflare", list(DNS_PRESETS.values())[0])
+            from .doh_resolver import provider_from_config
+            primary = provider_from_config(config) if config else DNS_PRESETS["cloudflare"]
 
-        cache_key = primary.name.lower()
+        cache_key = (primary.doh_host, primary.doh_path, primary.server_ips, primary.port)
         with _FAILOVER_MANAGERS_LOCK:
             if force_new or cache_key not in _FAILOVER_MANAGERS:
                 _FAILOVER_MANAGERS[cache_key] = DNSFailoverManager(primary_provider=primary)
@@ -1291,9 +1292,16 @@ class DPIBypassProxy:
         if "dc-telemetry.net" in host.lower():
             return None
 
+        ipv6_enabled = getattr(getattr(self, "config", None), "ipv6_mode", "disabled") != "disabled"
+        if ":" in host and not ipv6_enabled:
+            return None
+
+        def available(ip):
+            return (ipv6_enabled or ":" not in str(ip)) and not is_ip_dead(ip)
+
         t_connect_start = time.time()
         candidate_ips = []
-        if target_ip and not is_ip_dead(target_ip):
+        if target_ip and available(target_ip):
             candidate_ips.append(target_ip)
         excluded_set = set()
         if exclude_ip:
@@ -1322,12 +1330,12 @@ class DPIBypassProxy:
             elif ("media" in h_low or "images-ext" in h_low or "attachments" in h_low) and cached_ip not in DISCORD_MEDIA_ANYCAST_IPS:
                 _WORKING_IP_CACHE.pop(host, None)
                 cached_ip = None
-        if cached_ip and is_ip_dead(cached_ip):
+        if cached_ip and not available(cached_ip):
             _WORKING_IP_CACHE.pop(host, None)
             cached_ip = None
         if cached_ip and health and health.status(network, host, port, cached_ip) != 'progress':
             cached_ip = None
-        if cached_ip and cached_ip not in excluded_set and not is_ip_dead(cached_ip):
+        if cached_ip and cached_ip not in excluded_set and available(cached_ip):
             fast_sock = self._try_direct_connect(cached_ip, port, timeout=min(2.0, conn_to))
             if fast_sock:
                 if is_discord_host(host):
@@ -1343,10 +1351,10 @@ class DPIBypassProxy:
                 c_time, c_ips = cached_entry
                 if time.time() - c_time < 300.0:
                     for ip in c_ips:
-                        if ip not in candidate_ips and ip not in excluded_set and not is_ip_dead(ip):
+                        if ip not in candidate_ips and ip not in excluded_set and available(ip):
                             candidate_ips.append(ip)
             elif isinstance(cached_entry, str):
-                if cached_entry not in candidate_ips and cached_entry not in excluded_set and not is_ip_dead(cached_entry):
+                if cached_entry not in candidate_ips and cached_entry not in excluded_set and available(cached_entry):
                     candidate_ips.append(cached_entry)
 
         # 2. DNS/DoH резолвинг с Single-Flight блокировкой для исключения лавины параллельных запросов
@@ -1359,10 +1367,10 @@ class DPIBypassProxy:
                         c_time, c_ips = cached_entry
                         if time.time() - c_time < 300.0:
                             for ip in c_ips:
-                                if ip not in candidate_ips and ip not in excluded_set and not is_ip_dead(ip):
+                                if ip not in candidate_ips and ip not in excluded_set and available(ip):
                                     candidate_ips.append(ip)
                     elif isinstance(cached_entry, str):
-                        if cached_entry not in candidate_ips and cached_entry not in excluded_set and not is_ip_dead(cached_entry):
+                        if cached_entry not in candidate_ips and cached_entry not in excluded_set and available(cached_entry):
                             candidate_ips.append(cached_entry)
 
                 # 2.1 Получаем IP-адреса хоста через getaddrinfo (Dual-Stack IPv4 + IPv6)
@@ -1377,7 +1385,7 @@ class DPIBypassProxy:
                                 if ai[0] == socket.AF_INET:
                                     if ip_addr not in v4_ips:
                                         v4_ips.append(ip_addr)
-                                elif ai[0] == socket.AF_INET6:
+                                elif ai[0] == socket.AF_INET6 and ipv6_enabled:
                                     if ip_addr not in v6_ips:
                                         v6_ips.append(ip_addr)
                         # В РФ на мобильном интернете IPv4 основной, IPv6 дополнительный
@@ -1419,7 +1427,7 @@ class DPIBypassProxy:
                         try:
                             harvested = self.doh_harvester.harvest(host)
                             for hip in (harvested or []):
-                                if hip not in doh_resolved and hip not in excluded_set and not is_ip_dead(hip) and not is_bogon_or_sinkhole_ip(hip):
+                                if hip not in doh_resolved and hip not in excluded_set and available(hip) and not is_bogon_or_sinkhole_ip(hip):
                                     doh_resolved.append(hip)
                         except Exception:
                             pass
@@ -1427,7 +1435,7 @@ class DPIBypassProxy:
                         try:
                             failover_ips = self.dns_failover.resolve(host)
                             for fip in (failover_ips or []):
-                                if fip not in doh_resolved and fip not in excluded_set and not is_ip_dead(fip) and not is_bogon_or_sinkhole_ip(fip):
+                                if fip not in doh_resolved and fip not in excluded_set and available(fip) and not is_bogon_or_sinkhole_ip(fip):
                                     doh_resolved.append(fip)
                             if failover_ips:
                                 valid_fips = [ip for ip in failover_ips if not is_bogon_or_sinkhole_ip(ip)]
@@ -1461,24 +1469,24 @@ class DPIBypassProxy:
                             elif isinstance(fallback_ip, str):
                                 flattened.append(fallback_ip)
                             for fip in flattened:
-                                if fip not in candidate_ips and fip not in excluded_set and not is_ip_dead(fip) and not is_bogon_or_sinkhole_ip(fip):
+                                if fip not in candidate_ips and fip not in excluded_set and available(fip) and not is_bogon_or_sinkhole_ip(fip):
                                     candidate_ips.append(fip)
 
                 if candidate_ips:
                     _RESOLVED_IPS_CACHE.set(host, (time.time(), list(candidate_ips)))
 
         # 4. Фильтруем заведомо мёртвые / сбрасывающие IP и исключенные адреса
-        raw_candidates = [ip for ip in candidate_ips if not is_bogon_or_sinkhole_ip(ip)]
-        candidate_ips = [ip for ip in candidate_ips if not is_ip_dead(ip) and ip not in excluded_set and not is_bogon_or_sinkhole_ip(ip)]
+        raw_candidates = [ip for ip in candidate_ips if (ipv6_enabled or ":" not in ip) and not is_bogon_or_sinkhole_ip(ip)]
+        candidate_ips = [ip for ip in candidate_ips if available(ip) and ip not in excluded_set and not is_bogon_or_sinkhole_ip(ip)]
 
         if is_googlevideo_host(host) and not is_plain_ip(host):
             for a_ip in GOOGLE_VIDEO_ANYCAST_IPS:
-                if a_ip not in candidate_ips and a_ip not in excluded_set and not is_ip_dead(a_ip):
+                if a_ip not in candidate_ips and a_ip not in excluded_set and available(a_ip):
                     candidate_ips.append(a_ip)
         elif is_google_or_youtube_host(host) and not is_plain_ip(host):
             h_thumb = str(host).lower().rstrip(".")
             is_thumbnail = any(p in h_thumb for p in ("ytimg.com", "ggpht.com", "googleusercontent.com"))
-            healthy_yt_anycast = [ip for ip in YOUTUBE_WEB_ANYCAST_IPS if ip not in excluded_set and not is_ip_dead(ip)]
+            healthy_yt_anycast = [ip for ip in YOUTUBE_WEB_ANYCAST_IPS if ip not in excluded_set and available(ip)]
             if is_thumbnail:
                 # Для хостов обложек и аватарок (ytimg.com, ggpht.com, googleusercontent.com) ставим проверенные Anycast IP в начало списка,
                 # исключая зависания на заблокированных провайдерских DNS IP (108.177.14.119, 74.125.131.198)
@@ -1534,11 +1542,11 @@ class DPIBypassProxy:
 
             verified_candidates = [
                 ip for ip in target_discord_pool
-                if ip not in excluded_set and not is_ip_dead(ip)
+                if ip not in excluded_set and available(ip)
             ]
             other_candidates = [
                 ip for ip in candidate_ips
-                if ip not in verified_candidates and ip not in excluded_set and not is_ip_dead(ip)
+                if ip not in verified_candidates and ip not in excluded_set and available(ip)
             ]
             candidate_ips = verified_candidates + other_candidates if verified_candidates else other_candidates
 
@@ -1561,7 +1569,7 @@ class DPIBypassProxy:
                     d_until = _DEAD_IP_CACHE.get(ip)
                     if d_until is not None and now >= d_until:
                         _DEAD_IP_CACHE.pop(ip, None)
-                alive_now = [ip for ip in potential if not is_ip_dead(ip)]
+                alive_now = [ip for ip in potential if available(ip)]
                 if alive_now:
                     candidate_ips = alive_now
                 elif service_pool:
@@ -1611,7 +1619,7 @@ class DPIBypassProxy:
                 pinned_primary = None
             verified = [ip for ip in pool if ip in candidate_ips]
             non_verified = [ip for ip in candidate_ips if ip not in verified]
-            if pinned_primary and pinned_primary in verified and not is_ip_dead(pinned_primary):
+            if pinned_primary and pinned_primary in verified and available(pinned_primary):
                 other_v = [ip for ip in verified if ip != pinned_primary]
                 candidate_ips = [pinned_primary] + other_v + non_verified
             elif verified:
@@ -1702,7 +1710,7 @@ class DPIBypassProxy:
                     try:
                         resolved = self.dns_failover.resolve(host)
                         for dip in (resolved or []):
-                            if dip and dip != primary_ip and dip not in excluded_set and not is_ip_dead(dip) and not is_bogon_or_sinkhole_ip(dip):
+                            if dip and dip != primary_ip and dip not in excluded_set and available(dip) and not is_bogon_or_sinkhole_ip(dip):
                                 if dip not in doh_candidates:
                                     doh_candidates.append(dip)
                     except Exception:
@@ -1711,7 +1719,7 @@ class DPIBypassProxy:
                     try:
                         harvested = self.doh_harvester.harvest(host)
                         for hip in (harvested or []):
-                            if hip and hip != primary_ip and hip not in excluded_set and not is_ip_dead(hip) and not is_bogon_or_sinkhole_ip(hip):
+                            if hip and hip != primary_ip and hip not in excluded_set and available(hip) and not is_bogon_or_sinkhole_ip(hip):
                                 if hip not in doh_candidates:
                                     doh_candidates.append(hip)
                     except Exception:
@@ -1745,7 +1753,7 @@ class DPIBypassProxy:
                 if fallback_ip:
                     if isinstance(fallback_ip, (list, tuple)):
                         fallback_ip = fallback_ip[0] if fallback_ip else None
-                    if fallback_ip and fallback_ip != primary_ip and fallback_ip not in excluded_set and not is_ip_dead(fallback_ip):
+                    if fallback_ip and fallback_ip != primary_ip and fallback_ip not in excluded_set and available(fallback_ip):
                         s2 = None
                         try:
                             family2 = socket.AF_INET6 if ":" in fallback_ip else socket.AF_INET
@@ -1947,7 +1955,7 @@ class DPIBypassProxy:
             try:
                 resolved = self.dns_failover.resolve(host)
                 for dip in (resolved or []):
-                    if dip and dip not in candidate_ips and dip not in excluded_set and not is_ip_dead(dip) and not is_bogon_or_sinkhole_ip(dip):
+                    if dip and dip not in candidate_ips and dip not in excluded_set and available(dip) and not is_bogon_or_sinkhole_ip(dip):
                         if dip not in doh_candidates:
                             doh_candidates.append(dip)
             except Exception:
@@ -1956,7 +1964,7 @@ class DPIBypassProxy:
             try:
                 harvested = self.doh_harvester.harvest(host)
                 for hip in (harvested or []):
-                    if hip and hip not in candidate_ips and hip not in excluded_set and not is_ip_dead(hip) and not is_bogon_or_sinkhole_ip(hip):
+                    if hip and hip not in candidate_ips and hip not in excluded_set and available(hip) and not is_bogon_or_sinkhole_ip(hip):
                         if hip not in doh_candidates:
                             doh_candidates.append(hip)
             except Exception:
@@ -2119,6 +2127,7 @@ class DPIBypassProxy:
         elif not is_discord and strategy in ("disoob_sni", "boringssl_split", "dummy_record_prepend"):
             strategy = "tcp_split_sni_mid"
 
+        strategy = self.strategy_engine.allowed_strategy(strategy)
         self._safe_execute_strategy(strategy, target_sock, data, host=sni_name)
         return strategy, sni_name
 
@@ -2301,6 +2310,7 @@ class DPIBypassProxy:
             f"(IP: {current_ip} -> {new_ip})"
         )
 
+        strat3 = self.strategy_engine.allowed_strategy(strat3)
         t_send3 = time.time()
         if not self._safe_execute_strategy(strat3, new_sock, first_packet, host=effective_host):
             _safe_close_socket(new_sock)

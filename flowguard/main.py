@@ -873,6 +873,9 @@ class FloweryApp:
                 except ImportError:
                     from flowguard.proxy import get_dns_failover_manager
                 self.proxy_server.dns_failover = get_dns_failover_manager(self.config, force_new=True)
+                from flowguard.doh_resolver import MultiDoHHarvester
+                self.proxy_server.doh_harvester = MultiDoHHarvester(self.config)
+                self.proxy_server.flush_stale_caches()
 
             self.dns_mgr.primary_dns = ip1
             self.dns_mgr.secondary_dns = ip2 or "8.8.8.8"
