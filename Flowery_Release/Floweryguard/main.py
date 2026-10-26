@@ -326,7 +326,7 @@ atexit.register(release_single_instance_mutex)
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from flowguard.config import Config, load_whitelist_domains
+from flowguard.config import Config, load_whitelist_domains, get_app_base_dir
 from flowguard.ttl_fix import TTLManager, MTUManager, is_admin, check_admin_or_elevate
 from flowguard.system_proxy import SystemProxyManager, build_proxy_override
 from flowguard.quic_block import QUICBlocker
@@ -1638,17 +1638,12 @@ def main():
     init_terminal()
     set_app_icon()
 
-    app_base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app_base = get_app_base_dir()
     if os.path.isdir(app_base):
         try:
             os.chdir(app_base)
         except Exception as e:
             logger.debug("[Main] os.chdir to app_base failed: %s", e)
-    elif getattr(sys, "frozen", False):
-        try:
-            os.chdir(os.path.dirname(sys.executable))
-        except Exception as e:
-            logger.debug("[Main] os.chdir to executable dir failed: %s", e)
 
     parser = argparse.ArgumentParser(description="Flowery (Glue) — DPI bypass tool для мобильного тетеринга")
     parser.add_argument("--menu", action="store_true", help="Запустить интерактивное меню (по умолчанию без параметров)")

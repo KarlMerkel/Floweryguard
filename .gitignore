@@ -48,7 +48,7 @@ scratch/
 *.tmp
 strategy_scores.json
  
-Flowery.spec
+/Flowery_Release/Flowery.spec
 Flowery.exe
 Flowery_Release/Flowery.exe
 
