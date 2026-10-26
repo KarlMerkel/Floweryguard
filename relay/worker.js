@@ -39,6 +39,13 @@ export default {
 
     // Вспомогательный эндпоинт для разработчика: помогает узнать свой chat_id из Telegram
     if (url.pathname === '/my-chat-id') {
+      // Обновления бота содержат сообщения и идентификаторы пользователей.
+      if (!env.ADMIN_TOKEN) {
+        return new Response('Not Found', { status: 404 });
+      }
+      if (request.headers.get('Authorization') !== `Bearer ${env.ADMIN_TOKEN}`) {
+        return new Response('Unauthorized', { status: 401 });
+      }
       if (!env.TELEGRAM_BOT_TOKEN) {
         return new Response(JSON.stringify({ error: 'TELEGRAM_BOT_TOKEN not configured in Worker Secrets' }), {
           status: 500,
