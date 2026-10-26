@@ -110,7 +110,7 @@ def worker():
     dns._original_dns = {"Adapter": ["192.0.2.53"]}
     backup = Path("audit-dns-backup.json")
     backup.write_text("{}", encoding="utf-8")
-    with patch.object(dns_config, "is_admin", return_value=True), patch.object(dns, "_get_backup_filepath", return_value=str(backup)), patch.object(dns_config.subprocess, "run", return_value=Mock(returncode=1)):
+    with patch.object(dns_config, "is_admin", return_value=True), patch.object(dns, "_get_backup_filepath", return_value=str(backup)), patch.object(dns_config, "run_command", return_value=Mock(returncode=1)):
         ok = dns.restore_dns()
     results["dns_failed_restore"] = {"reported_success": ok, "saved_state": dict(dns._original_dns), "backup_exists": backup.exists()}
 
@@ -122,7 +122,7 @@ def worker():
         ok = mtu.restore_mtu()
     results["mtu_failed_restore"] = {"reported_success": ok, "saved_state": dict(mtu.original_mtus), "retry_enabled": mtu._applied}
 
-    with patch.object(dns_config.subprocess, "run", return_value=Mock(stdout=b"Enabled Disconnected Dedicated Ethernet\r\n")):
+    with patch.object(dns_config, "run_command", return_value=Mock(returncode=0, stdout=b"Enabled Disconnected Dedicated Ethernet\r\n")):
         results["disconnected_adapter"] = dns.get_active_interfaces()
 
     cfg = Config("audit-config.ini")
