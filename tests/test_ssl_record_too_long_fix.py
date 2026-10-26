@@ -173,9 +173,11 @@ class TestSSLRecordTooLongFix(unittest.TestCase):
             self.assertIn("combo_tlsrec_tcpsplit", executed)
             self.assertEqual(executed[-1], "combo_tlsrec_tcpsplit")
 
-    def test_handshake_attempt3_discord_always_combo_on_new_ip(self):
-        """Для Discord при сбое Attempt 1 (combo на первом IP) Попытка 3 на новом IP
-        обязана использовать combo_tlsrec_tcpsplit (без деградации до tls_record_frag)."""
+    def test_handshake_attempt3_discord_uses_new_ip_observations(self):
+        """После смены IP используется проверенная на нём техника, включая TLS-фрагментацию."""
+        for _ in range(40):
+            self.proxy.strategy_engine.record_success(
+                'discord.com', 'tls_record_frag', ip='162.159.133.233', rtt_ms=25)
         client_hello = build_fake_client_hello("discord.com")
         current_sock = MagicMock()
         sock2 = MagicMock()
@@ -209,8 +211,8 @@ class TestSSLRecordTooLongFix(unittest.TestCase):
             )
 
             self.assertEqual(live_sock, new_sock)
-            self.assertEqual(strat_used, "combo_tlsrec_tcpsplit")
-            self.assertEqual(executed[-1], "combo_tlsrec_tcpsplit")
+            self.assertEqual(strat_used, "tls_record_frag")
+            self.assertEqual(executed[-1], "tls_record_frag")
 
     def test_handshake_attempt3_same_ip_falls_back_when_combo_failed(self):
         """Если новый IP недоступен (new_ip == current_ip) и combo_tlsrec_tcpsplit уже завершился неудачей,

@@ -87,6 +87,7 @@ class TestAuditTransport(unittest.TestCase):
         proxy.sni_spoofer = Mock()
         proxy.sni_spoofer.send_with_fake_sni_desync.return_value = False
         proxy.strategy_engine = Mock()
+        proxy.strategy_engine.get_user_override.return_value = None
         hello = build_fake_client_hello('example.com')
         upstream = Mock()
         with patch('flowguard.proxy.is_winws_tcp_filtering_active', return_value=False):

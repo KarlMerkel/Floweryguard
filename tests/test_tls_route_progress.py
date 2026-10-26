@@ -63,7 +63,7 @@ class TestTlsRouteProgress(unittest.TestCase):
                 self.proxy.strategy_engine.record_failure.assert_not_called()
                 self.assertIsNone(_WORKING_IP_CACHE.get('surfshark.com'))
                 self.assertIn('combo_tlsrec_tcpsplit',
-                              self.proxy.route_health.stalled_strategies('wifi', 'surfshark.com', 443))
+                              self.proxy.route_health.stalled_strategies('wifi', 'surfshark.com', 443, '104.18.120.10'))
 
     def test_full_transfer_is_rewarded_once(self):
         self.assertEqual(self.run_flow(100000), 'progress')
@@ -73,8 +73,8 @@ class TestTlsRouteProgress(unittest.TestCase):
     def test_short_transfer_and_websocket_are_not_degraded(self):
         self.assertEqual(self.run_flow(500), 'unknown')
         self.assertEqual(self.run_flow(14000, host='gateway.discord.gg'), 'unknown')
-        self.assertFalse(self.proxy.route_health.stalled_strategies('wifi', 'surfshark.com', 443))
-        self.assertFalse(self.proxy.route_health.stalled_strategies('wifi', 'gateway.discord.gg', 443))
+        self.assertFalse(self.proxy.route_health.stalled_strategies('wifi', 'surfshark.com', 443, '104.18.120.10'))
+        self.assertFalse(self.proxy.route_health.stalled_strategies('wifi', 'gateway.discord.gg', 443, '104.18.120.10'))
 
     def test_immediate_cancel_does_not_become_suspect_while_draining(self):
         self.assertEqual(self.run_flow(14000, end_time=1.1), 'unknown')

@@ -785,9 +785,12 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
         client_sock.settimeout.assert_called_with(3600.0)
         target_sock.settimeout.assert_called_with(3600.0)
 
-    def test_handshake_fast_fallback_youtube_skip_attempt2_and_strat3_combo(self):
+    def test_handshake_fast_fallback_youtube_skip_attempt2_and_use_observations(self):
         """При сбое Attempt 1 для YouTube Попытка 2 пропускается (skip_attempt2_fast_path),
-        а Попытка 3 гарантированно использует combo_tlsrec_tcpsplit на новом IP."""
+        а Попытка 3 использует технику, подтвердившую передачу данных."""
+        for _ in range(40):
+            self.proxy.strategy_engine.record_success(
+                'googlevideo.com', 'tls_record_frag', ip='198.51.100.2', rtt_ms=25)
         from flowguard.sni_spoofer import build_fake_client_hello
         ch = build_fake_client_hello("googlevideo.com")
         current_sock = MagicMock()
@@ -814,8 +817,8 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
             target_port=443,
             first_packet=ch
         )
-        self.assertEqual(res_strat, "combo_tlsrec_tcpsplit")
-        self.assertEqual(executed_strategies, ["combo_tlsrec_tcpsplit"])
+        self.assertEqual(res_strat, "tls_record_frag")
+        self.assertEqual(executed_strategies, ["tls_record_frag"])
 
     def test_pipe_sockets_discord_direct_ip_sets_3600_timeout(self):
         """Прямые IP подключения Discord (Gateway / Voice) должны получать таймаут 3600.0с."""

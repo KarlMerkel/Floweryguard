@@ -685,22 +685,6 @@ class ThompsonStrategySelector:
                     a = max(0.5, a * scale)
                     b = max(0.5, b * scale)
                 scores[s] = [a, b]
-            # Для зарубежных доменов гарантируем базовые экспертные приоритеты при переносе знаний
-            if not is_domestic_domain(domain_key):
-                if is_media_discord:
-                    scores["combo_tlsrec_tcpsplit"] = [12.0, 1.0]
-                    scores["tcp_split_sni_mid"] = [1.0, 5.0]
-                elif is_major_blocked or is_tracker:
-                    scores["combo_tlsrec_tcpsplit"] = [8.0, 2.0]
-                    scores["tcp_split_sni_mid"] = [1.0, 5.0]
-                else:
-                    if scores.get("combo_tlsrec_tcpsplit", [0, 0])[0] < 8.0:
-                        scores["combo_tlsrec_tcpsplit"] = [8.0, 2.0]
-                    if scores.get("tcp_split_sni_mid", [0, 0])[0] > 4.0:
-                        scores["tcp_split_sni_mid"] = [4.0, 2.0]
-            if is_youtube or cluster == "google":
-                if scores.get("boringssl_split", [0, 0])[0] < 6.0:
-                    scores["boringssl_split"] = [6.0, 2.0]
             return scores
 
         # 2. Экспертные стартовые априорные распределения (Priors)
@@ -718,7 +702,7 @@ class ThompsonStrategySelector:
             scores["tls_record_frag"] = [1.0, 5.0]
             scores["direct"] = [1.0, 5.0]
         elif is_media_discord:
-            # Для медиа-контента Discord (cdn, media, images) combo_tlsrec_tcpsplit гарантированно пробивает ТСПУ
+            # Начальное предпочтение для медиа Discord; наблюдения могут его изменить.
             scores["combo_tlsrec_tcpsplit"] = [12.0, 1.0]
             scores["tcp_split_sni_mid"] = [1.0, 5.0]
             scores["multi_split"] = [1.0, 4.0]
@@ -736,7 +720,7 @@ class ThompsonStrategySelector:
             scores["direct"] = [1.0, 5.0]
             scores["boringssl_split"] = [1.0, 5.0]
         elif is_discord or cluster == "discord":
-            # combo_tlsrec_tcpsplit гарантированно проходит ТСПУ для Discord HTTPS
+            # Начальное предпочтение для Discord HTTPS, без запрета альтернатив.
             scores["combo_tlsrec_tcpsplit"] = [8.0, 2.0]
             scores["tls_record_frag"] = [6.0, 2.0]
             scores["multi_split"] = [5.0, 2.0]
@@ -866,18 +850,9 @@ class ThompsonStrategySelector:
 
             candidates = net_scores[key]
 
-            # Ограничения несовместимости протоколов
+            # Все стратегии в ALL_STRATEGIES сохраняют TLS handshake.
+            # Имя сервиса задаёт начальные оценки, но не запрещает альтернативы.
             excluded = set()
-            if not is_youtube:
-                excluded.update(["boringssl_split"])
-            if is_core_discord:
-                # Для Core Discord на Cloudflare стабильно работает исключительно combo_tlsrec_tcpsplit
-                excluded.update(["direct", "boringssl_split"])
-            if is_media_discord:
-                # Для Discord Media исключаем несовместимые техники; tcp_split_sni_mid гарантированно блокируется ТСПУ на Cloudflare
-                excluded.update(["boringssl_split", "direct", "tcp_split_sni_mid"])
-            if is_youtube:
-                excluded.update(["direct", "tls_record_frag"])
 
             # Принудительное исключение техник, отключенных в config.ini ([bypass])
             if self._allowed_strategies is not None:
@@ -947,147 +922,38 @@ class ThompsonStrategySelector:
         is_tspu: bool = True,
         is_whitelisted: bool = False,
     ) -> str:
-        """Возвращает сильнейшую альтернативную стратегию обхода при подтвержденном сбросе ТСПУ.
-        
-        Выбирает кандидата с наивысшим статистическим рейтингом успеха (Thompson Sampling),
-        исключая упавшую стратегию failed_strategy и список failed_strategies.
-        """
+        """Выбирает альтернативу по наблюдениям, без закрепления техники за доменом."""
         cluster = classify_cdn_cluster(host, ip)
-        if not is_youtube and cluster == "google":
-            is_youtube = True
-        if not is_discord and cluster == "discord":
-            is_discord = True
+        is_youtube = is_youtube or cluster == "google"
+        is_discord = is_discord or cluster in ("discord", "discord_media")
+        excluded = set(failed_strategies or ())
+        if failed_strategy:
+            excluded.add(failed_strategy)
+        valid = [name for name in _STABLE_ORDER if name not in excluded
+                 and (self._allowed_strategies is None or name in self._allowed_strategies)]
+        if not valid:
+            # Все разрешённые техники уже пробовали: повторяем лучшую по оценкам.
+            # Число попыток ограничивает вызывающий Fast-Fallback.
+            valid = [name for name in _STABLE_ORDER
+                     if self._allowed_strategies is None or name in self._allowed_strategies]
+            if not valid:
+                return "direct"
 
-        h_lower = (host or "").lower()
-        is_media_dc = (
-            cluster in ("discord_media", "discord")
-            or any(m in h_lower for m in (
-                "cdn.discordapp.com", "media.discordapp.net", "attachments.discord.net",
-                "discordapp.net", "discordapp.com", "images-ext", "discord.net",
-                "tenor.com", "giphy.com", "tenor.googleapis.com"
-            ))
-            or h_lower.endswith(".discordapp.com")
-            or h_lower.endswith(".discordapp.net")
-            or h_lower.endswith(".discord.net")
-            or h_lower.endswith(".tenor.com")
-            or h_lower.endswith(".giphy.com")
-        ) and not (
-            "gateway" in h_lower or h_lower == "discord.gg" or h_lower.endswith(".discord.gg")
-        )
-
-        excluded_early = {failed_strategy} if failed_strategy else set()
-        if failed_strategies:
-            excluded_early.update(failed_strategies)
-
-        # Для Discord Media единственной рабочей техникой против ТСПУ на Cloudflare
-        # является combo_tlsrec_tcpsplit (при сбое выполняется ротация IP, а не смена техники на блокируемую).
-        if is_media_dc and "combo_tlsrec_tcpsplit" not in excluded_early:
-            return "combo_tlsrec_tcpsplit"
-
-        is_major_blocked = any(b in h_lower for b in MAJOR_BLOCKED_PATTERNS)
-        is_tracker = any(t in h_lower for t in ("rutracker", "nnmclub", "rutor", "kinozal", "t-ru.org"))
-        if (is_whitelisted or is_major_blocked or is_tracker) and "combo_tlsrec_tcpsplit" not in excluded_early:
-            return "combo_tlsrec_tcpsplit"
-
-        if is_youtube:
-            candidates = [
-                "combo_tlsrec_tcpsplit",
-                "tcp_split_sni_mid",
-                "multi_split",
-                "tcp_split_sni_start",
-                "boringssl_split",
-            ]
-        elif is_discord:
-            candidates = [
-                "combo_tlsrec_tcpsplit",
-                "tls_record_frag",
-                "tcp_split_sni_mid",
-                "multi_split",
-            ]
-        else:
-            candidates = [
-                "combo_tlsrec_tcpsplit",
-                "tcp_split_sni_mid",
-                "tcp_split_sni_start",
-                "multi_split",
-                "tls_record_frag",
-                "direct",
-            ]
-
-        # Фильтруем упавшую стратегию, несовместимые с протоколом и отключенные в config.ini
-        excluded = {failed_strategy} if failed_strategy else set()
-        if failed_strategies:
-            excluded.update(failed_strategies)
-        if not is_youtube:
-            excluded.add("boringssl_split")
-        if is_discord:
-            excluded.add("direct")
-        if is_tracker:
-            excluded.add("direct")
-        if is_major_blocked:
-            excluded.add("direct")
-        if is_media_dc:
-            excluded.update(["boringssl_split", "direct", "tcp_split_sni_mid"])
-        if is_youtube:
-            excluded.update(["direct", "tls_record_frag"])
-
-        valid_candidates = [
-            s for s in candidates
-            if s not in excluded and s in ALL_STRATEGIES
-            and (self._allowed_strategies is None or s in self._allowed_strategies)
-        ]
-        if not valid_candidates:
-            fallback_pool = [
-                s for s in ALL_STRATEGIES
-                if s not in excluded and (self._allowed_strategies is None or s in self._allowed_strategies)
-            ]
-            valid_candidates = fallback_pool if fallback_pool else (["combo_tlsrec_tcpsplit"] if (is_discord or is_youtube) else ["tcp_split_sni_mid"])
-
-        # Если доступна статистика Thompson Sampling по текущей сети и хосту/подсети:
         key = self._get_composite_key(host, ip)
         domain = self._get_domain_key(host)
-        net = self._current_network
-
         with self._lock:
-            net_scores = self._scores.get(net, {})
-            scores = net_scores.get(key)
-            if not scores and "default" in self._scores:
-                scores = self._scores["default"].get(key)
+            net_scores = self._scores.get(self._current_network, {})
+            default_scores = self._scores.get("default", {})
+            scores = net_scores.get(key) or default_scores.get(key)
             if not scores and key != domain:
-                scores = net_scores.get(domain) or (self._scores.get("default", {}).get(domain))
+                scores = net_scores.get(domain) or default_scores.get(domain)
+            scores = {name: tuple(ab) for name, ab in scores.items()} if scores else self._init_domain_priors(domain, is_youtube, is_discord)
 
-        if not scores:
-            scores = self._init_domain_priors(domain, is_youtube, is_discord)
+        def expected(name):
+            alpha, beta = scores.get(name, (1.0, 1.0))
+            return alpha / (alpha + beta) if alpha + beta >= 3.0 else 0.25
 
-        if scores:
-            # Сортируем валидных кандидатов по математическому ожиданию вероятности успеха: alpha / (alpha + beta)
-            def score_strat(s: str) -> float:
-                if s in scores:
-                    a, b = scores[s]
-                    return a / max(0.1, (a + b))
-                return 0.5
-
-            # При сбросе ТСПУ отдаем приоритет combo_tlsrec_tcpsplit, если он не был опробован,
-            # кроме случаев, когда альтернатива имеет подтвержденные победы (alpha >= 15.0).
-            if "combo_tlsrec_tcpsplit" in valid_candidates and is_tspu:
-                combo_exp = score_strat("combo_tlsrec_tcpsplit")
-                has_dominant = False
-                for c in valid_candidates:
-                    if c != "combo_tlsrec_tcpsplit":
-                        c_a, c_b = scores.get(c, [1.0, 3.0])
-                        if c_a >= 15.0 and (c_a / max(0.1, c_a + c_b)) > combo_exp:
-                            has_dominant = True
-                            break
-                if not has_dominant:
-                    return "combo_tlsrec_tcpsplit"
-
-            ranked = sorted(valid_candidates, key=score_strat, reverse=True)
-            return ranked[0]
-
-        if "combo_tlsrec_tcpsplit" in valid_candidates and is_tspu:
-            return "combo_tlsrec_tcpsplit"
-
-        return valid_candidates[0]
+        return max(valid, key=expected)
 
     def get_scores_for_key(self, host: str, ip: Optional[str] = None) -> Optional[Dict[str, List[float]]]:
         """Возвращает текущие веса стратегий для хоста/подсети с учетом активной сети."""

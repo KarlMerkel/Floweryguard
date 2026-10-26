@@ -2053,37 +2053,33 @@ class DPIBypassProxy:
         config = getattr(self, "config", None)
         if config is None:
             return None
-        if is_gaming_host(host) or is_telegram_host(host):
-            return "direct"
         is_discord = is_discord_host(host)
         is_youtube = is_google_or_youtube_host(host.lower())
         if config.only_target_domains and not (is_discord or is_youtube):
             with self._whitelist_lock:
                 if not is_host_in_whitelist(host, self.whitelist_domains):
                     return "direct"
+        override = self.strategy_engine.get_user_override(host)
+        if override:
+            return self.strategy_engine.allowed_strategy(override)
         if not config.auto_strategy:
-            strategy = config.default_strategy
-            if is_youtube:
-                strategy = "combo_tlsrec_tcpsplit"
-            elif not is_discord and strategy in ("disoob_sni", "boringssl_split", "dummy_record_prepend"):
-                strategy = "tcp_split_sni_mid"
-            return self.strategy_engine.allowed_strategy(strategy)
+            return self.strategy_engine.allowed_strategy(config.default_strategy)
         return None
 
     def _strategy_after_stall(self, host, port, ip, selected, excluded=()):
-        """После зависания пробует иную технику только для этой сети и сайта."""
+        """После зависания пробует иную технику только для этой сети, сайта и IP."""
         health = getattr(self, 'route_health', None)
         if health is None or self._fixed_strategy(host) is not None:
             return selected
         if self.strategy_engine.get_user_override(host):
             return selected
         network = getattr(self.strategy_engine, '_current_network', 'default')
-        stalled = health.stalled_strategies(network, host, port)
+        stalled = health.stalled_strategies(network, host, port, ip)
         avoid = stalled | set(excluded)
-        for candidate in health.progressing_strategies(network, host, port):
+        for candidate in health.progressing_strategies(network, host, port, ip):
             if candidate not in avoid and self.strategy_engine.allowed_strategy(candidate) == candidate:
                 return candidate
-        if selected not in stalled:
+        if selected not in avoid:
             return selected
         with self._whitelist_lock:
             whitelisted = is_host_in_whitelist(host, self.whitelist_domains)
@@ -2155,13 +2151,19 @@ class DPIBypassProxy:
             return "direct", sni_name
 
         # Движок адаптивных стратегий (Thompson Sampling в стиле Nova)
-        strategy = self.strategy_engine.select_strategy(
-            sni_name,
-            is_youtube=is_youtube,
-            is_discord=is_discord,
-            ip=ip,
-            is_whitelisted=is_whitelisted
-        )
+        # Для игр и Telegram начинаем без фрагментации, пока нет наблюдений.
+        # После сбоя они участвуют в том же адаптивном выборе, что и остальные TLS-хосты.
+        if ((is_gaming_host(sni_name) or is_telegram_host(sni_name))
+                and not self.strategy_engine.get_scores_for_key(sni_name, ip)):
+            strategy = "direct"
+        else:
+            strategy = self.strategy_engine.select_strategy(
+                sni_name,
+                is_youtube=is_youtube,
+                is_discord=is_discord,
+                ip=ip,
+                is_whitelisted=is_whitelisted
+            )
         strategy = self._strategy_after_stall(sni_name, target_port, ip, strategy)
         self._safe_execute_strategy(strategy, target_sock, data, host=sni_name)
         return strategy, sni_name
@@ -2251,13 +2253,12 @@ class DPIBypassProxy:
 
         is_yt = is_google_or_youtube_host(effective_host.lower())
         is_dc = is_discord_host(effective_host)
-        is_gm = is_gaming_host(effective_host)
         with self._whitelist_lock:
             is_wl = is_host_in_whitelist(effective_host, self.whitelist_domains)
         is_whitelisted = is_wl
 
         # Fast-Path: при мертвом узле GGC IP (silent_drop на YouTube) или для Discord Media
-        # пропускаем Attempt 2, сразу ротируя IP на Попытке 3 (combo_tlsrec_tcpsplit - единственный рабочий режим).
+        # пропускаем Attempt 2, сразу ротируя IP на Попытке 3.
         skip_attempt2_fast_path = (is_yt and status1 == "silent_drop") or is_discord_media_host(effective_host)
 
         if skip_attempt2_fast_path and current_ip and is_dc:
@@ -2276,9 +2277,6 @@ class DPIBypassProxy:
         )
         if fixed_strategy is not None:
             strat2 = fixed_strategy
-        if is_gm:
-            strat2 = "direct"
-            skip_attempt2_fast_path = False
 
         strat2 = self._strategy_after_stall(effective_host, target_port, current_ip, strat2, (strat1,))
 
@@ -2334,8 +2332,12 @@ class DPIBypassProxy:
         else:
             is_rotated_ip = bool(new_sock and new_sock is not current_sock and (is_yt or is_dc))
 
-        if is_rotated_ip or ("combo_tlsrec_tcpsplit" not in failed_so_far and (is_yt or is_dc or strat1 == "direct")):
-            strat3 = "combo_tlsrec_tcpsplit"
+        if is_rotated_ip:
+            # Сбой техники на старом адресе не исключает её на новом.
+            failed_so_far = set()
+            strat3 = self.strategy_engine.select_strategy(
+                effective_host, ip=new_ip, is_youtube=is_yt,
+                is_discord=is_dc, is_whitelisted=is_wl)
         else:
             strat3 = self.strategy_engine.get_fallback_strategy(
                 effective_host,
@@ -2488,7 +2490,7 @@ class DPIBypassProxy:
 
         def record_progress():
             self.route_health.record(network, host, port, target_ip, 'progress')
-            self.route_health.record_strategy(network, host, port, strategy, 'progress')
+            self.route_health.record_strategy(network, host, port, target_ip, strategy, 'progress')
             # Старое соединение не должно обучать новую сеть после смены профиля.
             if network != getattr(self.strategy_engine, '_current_network', 'default'):
                 return
@@ -2502,7 +2504,7 @@ class DPIBypassProxy:
                 return
             suspect_recorded = True
             self.route_health.record(network, host, port, target_ip, 'suspect')
-            self.route_health.record_strategy(network, host, port, strategy, 'suspect')
+            self.route_health.record_strategy(network, host, port, target_ip, strategy, 'suspect')
             logger.info(
                 '[Маршрут] %s:%s через %s: нет прогресса после %s байт (%s); '
                 'приоритет адреса временно снижен для новых соединений',

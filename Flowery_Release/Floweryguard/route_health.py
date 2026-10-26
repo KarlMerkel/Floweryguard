@@ -97,11 +97,11 @@ class RouteHealth:
             self._entries.clear()
             self._strategies.clear()
 
-    def record_strategy(self, network, host, port, strategy, outcome):
+    def record_strategy(self, network, host, port, ip, strategy, outcome):
         """Короткая подсказка для нового подключения, без штрафа общей статистики."""
-        if not host or not strategy or outcome not in ('progress', 'suspect'):
+        if not host or not ip or not strategy or outcome not in ('progress', 'suspect'):
             return
-        key = (network, host.lower().rstrip('.'), port, strategy)
+        key = (network, host.lower().rstrip('.'), port, ip, strategy)
         expires = self._clock() + (300.0 if outcome == 'progress' else 45.0)
         with self._lock:
             self._strategies[key] = (outcome, expires)
@@ -109,18 +109,18 @@ class RouteHealth:
             while len(self._strategies) > self._max_entries:
                 self._strategies.popitem(last=False)
 
-    def _strategy_observations(self, network, host, port, outcome):
-        scope = (network, host.lower().rstrip('.'), port)
+    def _strategy_observations(self, network, host, port, ip, outcome):
+        scope = (network, host.lower().rstrip('.'), port, ip)
         now = self._clock()
         with self._lock:
-            return [key[3] for key, (state, expires) in reversed(self._strategies.items())
-                    if key[:3] == scope and state == outcome and expires > now]
+            return [key[4] for key, (state, expires) in reversed(self._strategies.items())
+                    if key[:4] == scope and state == outcome and expires > now]
 
-    def stalled_strategies(self, network, host, port):
-        return set(self._strategy_observations(network, host, port, 'suspect'))
+    def stalled_strategies(self, network, host, port, ip):
+        return set(self._strategy_observations(network, host, port, ip, 'suspect'))
 
-    def progressing_strategies(self, network, host, port):
-        return self._strategy_observations(network, host, port, 'progress')
+    def progressing_strategies(self, network, host, port, ip):
+        return self._strategy_observations(network, host, port, ip, 'progress')
 
     def rank(self, network, host, port, candidates):
         """Стабильный порядок: передавшие данные, неизвестные, подозрительные."""
