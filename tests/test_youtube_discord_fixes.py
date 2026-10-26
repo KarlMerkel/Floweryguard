@@ -362,15 +362,15 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
             self.assertEqual(strat, "direct")
             target_sock.sendall.assert_called_once_with(client_hello)
 
-    def test_anycast_edge_ip_never_cached_in_working_ip_cache_for_googlevideo(self):
-        """Google Edge Anycast IPs никогда не должны кэшироваться в _WORKING_IP_CACHE для хостов *.googlevideo.com."""
-        from flowguard.proxy import _WORKING_IP_CACHE, mark_ip_working
+    def test_googlevideo_cache_requires_route_observation_not_pool_membership(self):
+        """Кэш принимает успешный адрес, но fast-path требует наблюдения для текущего маршрута."""
+        from flowguard.proxy import _WORKING_IP_CACHE, mark_ip_working, _get_socket_meta
         anycast_ip = "173.194.178.225"
         host = "rr1---sn-4g5ednks.googlevideo.com"
 
         # 1. Попытка пометить Anycast IP как рабочий для googlevideo
         mark_ip_working(anycast_ip, host)
-        self.assertIsNone(_WORKING_IP_CACHE.get(host))
+        self.assertEqual(_WORKING_IP_CACHE.get(host), anycast_ip)
 
         # 2. Реальный GGC IP должен успешно кэшироваться
         real_ggc_ip = "172.217.132.170"
@@ -389,7 +389,7 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
             res = self.proxy._connect_target(host, 443)
             self.assertIsNotNone(res)
             # Anycast IP должен быть вычищен из кэша
-            self.assertNotEqual(_WORKING_IP_CACHE.get(host), anycast_ip)
+            self.assertEqual(_get_socket_meta(res)['target_ip'], real_ggc_ip)
             mock_gai.assert_called_once()
 
     def test_fast_fallback_attempt2_uses_combo_when_direct_fails_under_winws(self):
@@ -718,18 +718,22 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
             res = resolve_fallback_dns("test-ipv6-only.googlevideo.com")
             self.assertIsNone(res)
 
-    def test_dc_telemetry_immediate_rejection(self):
-        """Запросы к *.dc-telemetry.net должны немедленно завершаться 502 Bad Gateway без DNS ожидания."""
-        from flowguard.proxy import resolve_fallback_dns
-        self.assertIsNone(resolve_fallback_dns("streamer-relay.dc-telemetry.net"))
-        self.assertIsNone(resolve_fallback_dns("dc-telemetry.net"))
-
-        self.assertIsNone(self.proxy._connect_target("streamer-relay.dc-telemetry.net", 443))
-
+    def test_dc_telemetry_uses_normal_dns_and_connect(self):
+        """Телеметрия проходит обычный DNS/CONNECT, без скрытого отказа по имени."""
+        from flowguard.proxy import resolve_fallback_dns, _DNS_CACHE
+        manager = MagicMock()
+        manager.resolve_one.return_value = '93.184.216.34'
+        for host in ('streamer-relay.dc-telemetry.net', 'dc-telemetry.net'):
+            _DNS_CACHE.pop(host, None)
+            with patch('flowguard.proxy.get_dns_failover_manager', return_value=manager):
+                self.assertEqual(resolve_fallback_dns(host), '93.184.216.34')
+                manager.resolve_one.assert_called_with(host)
         mock_client = MagicMock()
-        mock_client.recv.return_value = b"CONNECT streamer-relay.dc-telemetry.net:443 HTTP/1.1\r\nHost: streamer-relay.dc-telemetry.net\r\n\r\n"
-        self.proxy._handle_client(mock_client, ("127.0.0.1", 54321))
-        mock_client.sendall.assert_called_with(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+        mock_client.recv.side_effect = [b'CONNECT dc-telemetry.net:443 HTTP/1.1\r\n\r\n', b'']
+        with patch.object(self.proxy, '_connect_target', return_value=MagicMock()) as connect:
+            self.proxy._handle_client(mock_client, ('127.0.0.1', 54321))
+        connect.assert_called_once_with('dc-telemetry.net', 443)
+        mock_client.sendall.assert_called_once_with(b'HTTP/1.1 200 Connection Established\r\n\r\n')
 
     def test_quic_block_discord_detection(self):
         """quic_block должен содержать 'discord' в KNOWN_BROWSER_KEYS и находить Discord.exe."""

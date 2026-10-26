@@ -50,7 +50,7 @@ class StrategyExecutor:
     def boringssl_split(sock: socket.socket, data: bytes, delay: float = 0.002) -> None:
         """Специализированный TCP Split для Google/YouTube BoringSSL.
         Разбивает TCP-поток ровно по середине SNI хоста с отключением Nagle (TCP_NODELAY),
-        что гарантирует физическое разделение сегментов на канальном уровне сетевой карты.
+        Фактические границы TCP-сегментов зависят от ОС и сетевого оборудования.
         """
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

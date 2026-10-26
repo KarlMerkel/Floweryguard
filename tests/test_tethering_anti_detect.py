@@ -60,7 +60,8 @@ class TestTetheringAntiDetect(unittest.TestCase):
 
     def test_ncsi_dns_fallback(self):
         # dns.msftncsi.com должен моментально возвращать 131.107.255.255
-        ip = resolve_fallback_dns("dns.msftncsi.com")
+        self.config.set_override('ncsi_spoof', True)
+        ip = resolve_fallback_dns("dns.msftncsi.com", self.config)
         self.assertEqual(ip, "131.107.255.255")
 
     def test_custom_hosts(self):

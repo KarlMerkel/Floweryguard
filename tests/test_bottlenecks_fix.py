@@ -26,7 +26,7 @@ class TestBottlenecksFix(unittest.TestCase):
         self.assertTrue(is_bogon_or_sinkhole_ip("255.255.255.255"))
 
         # РКН заглушка
-        self.assertTrue(is_bogon_or_sinkhole_ip("192.144.59.14"))
+        self.assertFalse(is_bogon_or_sinkhole_ip("192.144.59.14"))
 
         # Валидные публичные IP (не bogon)
         self.assertFalse(is_bogon_or_sinkhole_ip("1.1.1.1"))
@@ -38,7 +38,7 @@ class TestBottlenecksFix(unittest.TestCase):
         """is_ip_dead должен мгновенно дисквалифицировать bogon/sinkhole IP."""
         self.assertTrue(is_ip_dead("0.0.0.0"))
         self.assertTrue(is_ip_dead("127.0.0.1"))
-        self.assertTrue(is_ip_dead("192.144.59.14"))
+        self.assertFalse(is_ip_dead("192.144.59.14"))
 
         # Обычный IP не мертв по умолчанию
         valid_ip = "198.51.100.99"

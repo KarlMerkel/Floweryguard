@@ -38,12 +38,13 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "tls_record_frag": True,
         "oob_data": False,
         "http_host_obfuscation": True,
+        "force_https": False,
         "strip_ech": False,
         "tls_padding": False,
     },
     "fragmentation": {
         "fragment_size": 3,
-        "fragment_delay": 0.001,  # 1 мс — гарантирует физическое разделение сегментов на мобильных сетях (Nagle/GSO)
+        "fragment_delay": 0.001,  # Пауза между отправками; фактическая сегментация зависит от TCP-стека.
         "tlsrec_split_at_sni": True,
     },
     "tethering": {
@@ -287,6 +288,10 @@ class Config:
     @property
     def http_host_obfuscation(self) -> bool:
         return self.get_bool("bypass", "http_host_obfuscation")
+
+    @property
+    def force_https(self) -> bool:
+        return self.get_bool("bypass", "force_https")
 
     @property
     def strip_ech(self) -> bool:

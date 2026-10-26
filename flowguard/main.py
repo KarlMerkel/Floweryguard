@@ -796,11 +796,13 @@ class FloweryApp:
             elif choice == "5":
                 print("\n\033[96m--- ВВОД СВОЕГО DNS-СЕРВЕРА ---\033[0m")
                 print("\033[97mВам НЕ нужно разбираться в протоколах или шаблонах.\033[0m")
-                print("\033[90mПросто введите IP-адрес (например: 192.144.59.14) или сайт (например: dns-ai.ru).\033[0m")
+                print("\033[90mВведите IP-адрес или домен выбранного вами DNS-сервера.\033[0m")
                 print("\033[90mFlowery сам подключится, проверит сертификаты и настроит безопасный DNS.\033[0m\n")
-                prompt_srv = f"Адрес вашего сервера [{cur_srv or '192.144.59.14'}]: "
+                prompt_srv = f"Адрес вашего сервера [{cur_srv}]: " if cur_srv else "Адрес вашего сервера (Enter — назад): "
                 srv_input = input(f"\033[93m{prompt_srv}\033[0m").strip()
-                target_str = srv_input if srv_input else (cur_srv or "192.144.59.14")
+                target_str = srv_input or cur_srv
+                if not target_str:
+                    return
 
                 print(f"\n\033[96m[*] Проверка сервера '{target_str}'...\033[0m")
                 from flowguard.doh_resolver import auto_detect_dns_provider

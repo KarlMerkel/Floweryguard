@@ -50,8 +50,8 @@ class TestTSPUProviderBlockFixes(unittest.TestCase):
         self.assertTrue(is_bogon_or_sinkhole_ip("127.0.1.1"))
         self.assertTrue(is_bogon_or_sinkhole_ip("0.0.0.0"))
         self.assertTrue(is_bogon_or_sinkhole_ip("::1"))
-        self.assertTrue(is_bogon_or_sinkhole_ip("192.144.59.14"))
-        self.assertTrue(is_bogon_or_sinkhole_ip("94.232.43.149"))
+        self.assertFalse(is_bogon_or_sinkhole_ip("192.144.59.14"))
+        self.assertFalse(is_bogon_or_sinkhole_ip("94.232.43.149"))
         self.assertTrue(is_bogon_or_sinkhole_ip(None))
         self.assertTrue(is_bogon_or_sinkhole_ip(""))
 

@@ -82,7 +82,7 @@ class TestDiscordCdnAndUpload(unittest.TestCase):
         self.assertIsNotNone(s)
         called_args = mock_sock.connect_ex.call_args or mock_sock.connect.call_args
         connected_ip = called_args[0][0][0]
-        self.assertIn(connected_ip, DISCORD_CLOUDFLARE_ANYCAST_IPS)
+        self.assertEqual(connected_ip, "104.16.248.249")
 
     @patch("socket.getaddrinfo")
     @patch("socket.socket")
@@ -101,7 +101,7 @@ class TestDiscordCdnAndUpload(unittest.TestCase):
         self.assertIsNotNone(s)
         called_args = mock_sock.connect.call_args or mock_sock.connect_ex.call_args
         connected_ip = called_args[0][0][0]
-        self.assertIn(connected_ip, DISCORD_CDN_ANYCAST_IPS)
+        self.assertEqual(connected_ip, dns_cdn_ip)
 
     @patch("socket.getaddrinfo")
     @patch("socket.socket")
@@ -120,7 +120,7 @@ class TestDiscordCdnAndUpload(unittest.TestCase):
         self.assertIsNotNone(s)
         called_args = mock_sock.connect.call_args or mock_sock.connect_ex.call_args
         connected_ip = called_args[0][0][0]
-        self.assertIn(connected_ip, DISCORD_MEDIA_ANYCAST_IPS)
+        self.assertEqual(connected_ip, dns_media_ip)
 
     def test_upload_flow_records_success_and_avoids_32kb_stall_ban(self):
         """Upload flow: клиент отправляет большой объем данных (>0 байт, HTTP PUT/POST),

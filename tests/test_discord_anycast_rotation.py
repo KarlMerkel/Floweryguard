@@ -186,10 +186,8 @@ class TestDiscordAnycastRotationAndTrapFixes(unittest.TestCase):
                 for call in mock_direct.call_args_list:
                     self.assertNotEqual(call[0][0], dead_ip)
 
-    def test_happy_eyeballs_discord_ip_rotation(self):
-        """Happy Eyeballs при повторных запросах циклически ротирует Anycast IP Cloudflare
-        и приоритизирует свежие адреса над недавно использованными.
-        """
+    def test_recent_use_does_not_disqualify_discord_dns_address(self):
+        """Недавнее использование адреса не является доказательством его отказа."""
         host = "discord.com"
         ips = ["162.159.135.232", "162.159.136.232", "162.159.137.232"]
 
@@ -220,12 +218,8 @@ class TestDiscordAnycastRotationAndTrapFixes(unittest.TestCase):
                     # Свежий IP из пула web nodes должен быть выбран, а не устаревший 135
                     from flowguard.proxy import _get_socket_meta
                     meta = _get_socket_meta(s)
-                    core_web_nodes = (
-                        "162.159.136.232", "162.159.137.232", "162.159.138.232",
-                        "162.159.128.233", "162.159.129.233", "162.159.130.233"
-                    )
-                    self.assertIn(meta.get("target_ip"), core_web_nodes)
-                    self.assertNotEqual(meta.get("target_ip"), "162.159.135.232")
+                    self.assertIn(meta.get("target_ip"), ips)
+                    self.assertEqual(meta.get("target_ip"), ips[0])
 
     def test_discord_dead_ip_strictly_excluded_from_happy_eyeballs(self):
         """Мертвый IP Cloudflare, сброшенный после тайм-аута, полностью исключается из перебора."""

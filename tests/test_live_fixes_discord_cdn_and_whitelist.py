@@ -135,8 +135,8 @@ class TestDiscordCDNAndWhitelistFixes(unittest.TestCase):
         self.assertIsNotNone(res_sock)
         self.assertIsNone(_WORKING_IP_CACHE.get("discord.com"))
 
-    def test_discord_cdn_anycast_rotation_when_primary_unavailable(self):
-        """При отказе основного узла CDN продолжает ротировать резервные адреса."""
+    def test_discord_cdn_keeps_dns_address_when_static_candidate_failed(self):
+        """Отказ зашитого кандидата не заставляет ротировать доступный адрес из DNS."""
         mark_ip_dead("162.159.136.232", duration=45.0)
         connected_ips = []
 
@@ -157,8 +157,7 @@ class TestDiscordCDNAndWhitelistFixes(unittest.TestCase):
         for ip in connected_ips:
             self.assertIn(ip, DISCORD_CDN_ANYCAST_IPS)
             self.assertNotEqual(ip, "162.159.136.232")
-        # Все 3 вызова получили РАЗНЫЕ IP благодаря ротации
-        self.assertEqual(len(set(connected_ips)), 3)
+        self.assertEqual(connected_ips, ['162.159.130.233'] * 3)
 
     def test_single_flight_lock_prevents_doh_stampede(self):
         """Single-Flight замок гарантирует, что для одного хоста выдается один замок."""

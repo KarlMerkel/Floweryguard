@@ -42,13 +42,15 @@ class TestDiscordMediaPrimary(unittest.TestCase):
         call = fake_socket.connect.call_args or fake_socket.connect_ex.call_args
         return call.args[0][0]
 
-    def test_media_uses_primary_even_when_recently_used(self):
-        """Параллельные картинки не должны уходить на зависающие узлы ради ротации."""
+    def test_fallback_is_stable_without_failure_observations(self):
+        """Без DNS и наблюдений остаётся воспроизводимый порядок резервных кандидатов."""
         for host in self.HOSTS:
             with self.subTest(host=host):
                 self.clear_caches()
                 _RECENT_DISCORD_IPS.set(self.PRIMARY, time.time())
-                self.assertEqual(self.connect(host), self.PRIMARY)
+                first = self.connect(host)
+                self.assertIn(first, DISCORD_CDN_ANYCAST_IPS + DISCORD_MEDIA_ANYCAST_IPS)
+                self.assertEqual(self.connect(host), first)
 
     def test_dead_primary_uses_alternative(self):
         for host in self.HOSTS:

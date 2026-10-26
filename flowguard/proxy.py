@@ -90,117 +90,63 @@ except ImportError:
             return False
 
 
+def _normalized_host(host: Optional[str]) -> str:
+    """Убирает порт и завершающую точку, сохраняя IPv6-литералы."""
+    h = str(host or '').lower().strip()
+    if h.startswith('[') and ']' in h:
+        return h[1:h.index(']')]
+    if h.count(':') == 1:
+        h = h.split(':', 1)[0]
+    return h.rstrip('.')
+
+
+def _matches_domain(host: Optional[str], domains) -> bool:
+    h = _normalized_host(host)
+    return any(h == domain or h.endswith('.' + domain) for domain in domains)
+
+
 def is_discord_host(host: Optional[str]) -> bool:
     """Проверяет, относится ли хост к инфраструктуре Discord (включая войсы *.discord.media и шлюзы)."""
-    if not host:
-        return False
-    h = str(host).lower().strip()
-    if h.startswith("[") and "]" in h:
-        h = h[1:h.find("]")]
-    elif ":" in h:
-        h = h.split(":")[0]
-    h = h.rstrip(".")
-    if any(h == ext.lstrip(".") or h.endswith(ext) for ext in (".storage.googleapis.com", ".amazonaws.com", ".blob.core.windows.net")):
-        return False
-    return (
-        "discord" in h
-        or h.endswith(".discord.media")
-        or h.endswith(".discord.gg")
-        or h.endswith(".discordapp.com")
-        or h.endswith(".discordapp.net")
-        or h.endswith(".discord.co")
-        or h.endswith(".discordcdn.com")
-        or h.endswith(".discord.dev")
-        or h.endswith(".dis.gd")
-        or h == "dis.gd"
-        or "discordactivities" in h
-        or "discordstatus.com" in h
-        or "dc-telemetry.net" in h
-        or "attachments.discord.net" in h
-        or "tenor.com" in h
-        or "giphy.com" in h
-        or "tenor.googleapis.com" in h
-        or is_discord_ip(h)
-    )
+    return _matches_domain(host, (
+        'discord.com', 'discord.media', 'discord.gg', 'discordapp.com', 'discordapp.net',
+        'discord.net', 'discord.co', 'discordcdn.com', 'discord.dev', 'dis.gd',
+        'discordactivities.com', 'discordstatus.com', 'dc-telemetry.net',
+        'tenor.com', 'giphy.com', 'tenor.googleapis.com'
+    )) or is_discord_ip(_normalized_host(host))
 
 
 def is_discord_network_host(host: Optional[str]) -> bool:
     """Проверяет, относится ли хост к веб/CDN/медиа инфраструктуре Discord на Cloudflare Anycast."""
-    if not host:
-        return False
-    h = str(host).lower().strip()
-    if h.startswith("[") and "]" in h:
-        h = h[1:h.find("]")]
-    elif ":" in h:
-        h = h.split(":")[0]
-    h = h.rstrip(".")
-    if h.endswith(".discord.media"):
-        return False
-    return (
-        h in ("discord.com", "gateway.discord.gg", "cdn.discordapp.com", "media.discordapp.net", "attachments.discord.net")
-        or h.endswith(".discord.com")
-        or h.endswith(".discord.gg")
-        or h.endswith(".discordapp.com")
-        or h.endswith(".discordapp.net")
-        or h.endswith(".discord.net")
-        or "images-ext" in h
-        or "attachments.discord.net" in h
-        or "cdn.discordapp.com" in h
-        or "media.discordapp.net" in h
-    )
+    return _matches_domain(host, (
+        'discord.com', 'discord.gg', 'discordapp.com', 'discordapp.net', 'discord.net',
+        'discordcdn.com'
+    ))
 
 
 def is_discord_media_host(host: Optional[str]) -> bool:
     """Проверяет, относится ли хост к CDN или медиа Discord (аватарки, картинки, вложения, GIF Tenor/Giphy)."""
-    if not host:
-        return False
-    h = str(host).lower().strip()
-    if h.startswith("[") and "]" in h:
-        h = h[1:h.find("]")]
-    elif ":" in h:
-        h = h.split(":")[0]
-    h = h.rstrip(".")
-    if h.endswith(".discord.media"):
-        return False
-    return (
-        any(m in h for m in (
-            "cdn.discordapp.com", "media.discordapp.net", "attachments.discord.net",
-            "images-ext", "dl.discordapp.net", "dl2.discordapp.net",
-            "tenor.com", "giphy.com", "tenor.googleapis.com"
-        ))
-        or h.endswith(".discordapp.com")
-        or h.endswith(".discordapp.net")
-        or h.endswith(".discord.net")
-        or h.endswith(".tenor.com")
-        or h.endswith(".giphy.com")
-    )
+    return _matches_domain(host, (
+        'discordapp.com', 'discordapp.net', 'discord.net', 'discordcdn.com',
+        'tenor.com', 'giphy.com', 'tenor.googleapis.com'
+    ))
 
 
 def is_google_or_youtube_host(host: Optional[str]) -> bool:
     """Проверяет, относится ли хост к YouTube/Google Video, обрабатываемым zapret на уровне WinDivert."""
-    if not host:
-        return False
-    h = str(host).lower().rstrip(".")
-    return any(p in h for p in [
+    return _matches_domain(host, (
         "youtube.com", "googlevideo.com", "ytimg.com", "youtu.be",
         "ggpht.com", "googleusercontent.com", "youtube-nocookie.com", "yt.be", "gvt1.com",
-        "youtubei.googleapis.com", "youtubei."
-    ])
+        "youtubei.googleapis.com", "youtubei.google.com"
+    ))
 
 
 def is_googlevideo_host(host: Optional[str]) -> bool:
     """Проверяет, относится ли хост к медиа-серверам Google Video (GGC)."""
-    if not host:
-        return False
-    h = str(host).lower().rstrip(".")
-    return "googlevideo.com" in h
+    return _matches_domain(host, ('googlevideo.com',))
 
 
 def is_gaming_host(host: Optional[str]) -> bool:
     """Проверяет, относится ли хост к игровым сервисам (Steam, сетевые игры, PlayStation, PlayFab, GameGuard)."""
-    if not host:
-        return False
-    h = str(host).lower().rstrip(".")
     gaming_patterns = [
         "steampowered.com", "steamcommunity.com", "steamserver.net", "steamcontent.com",
         "steamstatic.com", "steam-chat.com", "valve.net", "valvesoftware.com",
@@ -209,22 +155,15 @@ def is_gaming_host(host: Optional[str]) -> bool:
         "arrowheadgs.com", "helldivers2.dev", "nprotect.net", "nprotect.com",
         "inca.co.kr", "gameguard.des", "gameguard.co.kr", "battleye.com", "easyanticheat.net"
     ]
-    return any(p in h for p in gaming_patterns)
+    return _matches_domain(host, gaming_patterns)
 
 
 def is_telegram_host(host: Optional[str]) -> bool:
     """Проверяет, относится ли хост к инфраструктуре Telegram (MTProto DC, Web, API)."""
-    if not host:
-        return False
-    h = str(host).lower().rstrip(".")
-    return (
-        "telegram" in h
-        or h.endswith(".t.me") or h == "t.me"
-        or "telegra.ph" in h
-        or "tdesktop.com" in h
-        or h.startswith("149.154.")
-        or h.startswith("91.108.")
-    )
+    h = _normalized_host(host)
+    return _matches_domain(h, (
+        'telegram.org', 'telegram.me', 'telegram.dog', 't.me', 'telegra.ph', 'tdesktop.com'
+    )) or (is_plain_ip(h) and (h.startswith('149.154.') or h.startswith('91.108.')))
 
 
 
@@ -308,40 +247,32 @@ _IP_DEAD_STRIKES: Dict[str, int] = {}
 _IP_FAILURES: Dict[str, Set[str]] = {}
 _IP_DEAD_STRIKES_LOCK = threading.Lock()
 _IP_FAILURES_LOCK = threading.Lock()
-# Предустановленные blackhole IP (Cymru/Tor blackholes, блокирующие TLS в РФ)
-for _dead_ip in ("204.8.99.144", "204.8.99.146"):
-    _DEAD_IP_CACHE.set(_dead_ip, time.time() + 86400.0)
+
+
+# Служебные диапазоны IPv4: RFC 1918, RFC 6598, RFC 2544 и зарезервированные классы.
+# Доступность публичных адресов определяется наблюдениями, а не этим списком.
+_NON_PUBLIC_V4 = tuple(ipaddress.ip_network(network) for network in (
+    '0.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+    '100.64.0.0/10', '198.18.0.0/15', '240.0.0.0/4'))
+_LOCAL_V6 = ipaddress.ip_network('fc00::/7')  # ULA, RFC 4193.
 
 
 def is_bogon_or_sinkhole_ip(ip: Optional[str]) -> bool:
-    """Проверяет, является ли IP bogon/loopback/sinkhole заглушкой провайдера."""
-    if not ip or not isinstance(ip, str):
+    """Отсекает служебные адреса; не объявляет публичные узлы заглушками."""
+    if not isinstance(ip, str) or not ip.strip():
         return True
-    ip = ip.strip()
-    if not ip:
+    try:
+        address = ipaddress.ip_address(ip.strip())
+    except ValueError:
+        # В старых путях вызова здесь может быть имя хоста: его ещё предстоит разрешить.
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
         return True
-    if ip in ("0.0.0.0", "255.255.255.255", "::1", "192.144.59.14", "94.232.43.149"):
-        return True
-    if ip.startswith("127."):
-        return True
-    # Публичную подсеть нельзя считать заглушкой без проверки конкретного маршрута.
-    # Ошибки её узлов учитываются временно в RouteHealth, отдельно для каждого хоста.
-    # Приватные подсети RFC 1918, RFC 2544 (198.18.0.0/15) и CGNAT (подменяемые DNS-заглушками провайдеров / VPN Fake-IP)
-    if ip.startswith("10.") or ip.startswith("192.168.") or ip.startswith("169.254.") or ip.startswith("198.18.") or ip.startswith("198.19."):
-        return True
-    if ip.startswith("172."):
-        parts = ip.split(".")
-        if len(parts) >= 2 and parts[1].isdigit():
-            val = int(parts[1])
-            if 16 <= val <= 31:
-                return True
-    if ip.startswith("100."):
-        parts = ip.split(".")
-        if len(parts) >= 2 and parts[1].isdigit():
-            val = int(parts[1])
-            if 64 <= val <= 127:
-                return True
-    return False
+    if address.version == 4:
+        return any(address in network for network in _NON_PUBLIC_V4)
+    return address in _LOCAL_V6
 
 
 def is_ip_dead(ip: str) -> bool:
@@ -372,10 +303,6 @@ def mark_ip_working(ip: Optional[str], host: Optional[str] = None) -> None:
         with _IP_FAILURES_LOCK:
             _IP_FAILURES.pop(ip, None)
         if host:
-            if is_googlevideo_host(host) and ip in GOOGLE_EDGE_ANYCAST_IPS:
-                return
-            if is_google_or_youtube_host(host) and not is_googlevideo_host(host) and ip in GOOGLE_VIDEO_ANYCAST_IPS:
-                return
             if is_discord_host(host) and (is_cloudflare_anycast_ip(ip) or is_discord_ip(ip)):
                 _WORKING_IP_CACHE.set(host, ip, ttl=300.0)
                 return
@@ -405,10 +332,15 @@ def record_ip_strategy_failure(ip: str, strategy: str, domain: Optional[str] = N
 def resolve_fallback_dns(domain: str, config: Optional[Any] = None) -> Optional[str]:
     """Резервный резолвинг доменов через независимые DNS-серверы, если оператор блокирует DNS."""
     domain_clean = domain.lower().strip(".")
-    if "dns.msftncsi.com" in domain_clean:
+    manual_ip = _configured_host_ip(domain_clean, config)
+    if manual_ip:
+        if is_bogon_or_sinkhole_ip(manual_ip):
+            return None
+        if ':' in manual_ip and getattr(config, 'ipv6_mode', 'disabled') == 'disabled':
+            return None
+        return manual_ip
+    if domain_clean == "dns.msftncsi.com" and getattr(config, 'ncsi_spoof', False):
         return "131.107.255.255"
-    if "dc-telemetry.net" in domain_clean:
-        return None
     cached = _DNS_CACHE.get(domain_clean)
     if cached:
         return cached
@@ -588,15 +520,15 @@ YOUTUBE_WEB_ANYCAST_IPS: List[str] = [
 GOOGLE_EDGE_ANYCAST_IPS: List[str] = YOUTUBE_WEB_ANYCAST_IPS + GOOGLE_VIDEO_ANYCAST_IPS
 
 DISCORD_CORE_ANYCAST_IPS: List[str] = [
-    # Discord Gateway Anycast (.234) - 162.159.134.234 verified working on TSPU
+    # Резервные кандидаты Gateway (.234); доступность зависит от текущего маршрута.
     "162.159.134.234", "162.159.136.234", "162.159.130.234", "162.159.133.234", "162.159.128.234",
-    # Discord Web / API Anycast (.232, .233) - 162.159.136.232 verified working on TSPU
+    # Резервные кандидаты Web / API (.232, .233).
     "162.159.136.232", "162.159.137.232", "162.159.138.232",
     "162.159.128.233", "162.159.129.233", "162.159.130.233"
 ]
 
 # Узел Cloudflare, на котором загрузка не обрывается после 16 КБ (Discord, X).
-CLOUDFLARE_VERIFIED_EDGE_IP = "162.159.136.232"
+CLOUDFLARE_FALLBACK_EDGE_IP = "162.159.136.232"
 
 DISCORD_CDN_ANYCAST_IPS: List[str] = [
     # Discord CDN Anycast (.232 - Head priority expected by tests and fast-path)
@@ -624,8 +556,6 @@ DISCORD_CLOUDFLARE_ANYCAST_IPS: List[str] = [
 ]
 
 _RECENT_DISCORD_IPS = ThreadSafeBoundedCache(maxsize=256, default_ttl=30.0)
-_DISCORD_IP_ROTATION_INDEX: int = 0
-_DISCORD_IP_ROTATION_LOCK = threading.Lock()
 
 _SOCKET_META = ThreadSafeBoundedCache(maxsize=2048)
 
@@ -854,8 +784,7 @@ class DPIBypassProxy:
 
     @staticmethod
     def _is_ncsi_request(host: str, path: str = "/") -> bool:
-        h = (host or "").lower()
-        return "msftncsi" in h or "msftconnecttest" in h
+        return _matches_domain(host, ('msftncsi.com', 'msftconnecttest.com'))
 
     @staticmethod
     def _handle_ncsi_response(host: str, path: str = "/") -> bytes:
@@ -1129,9 +1058,8 @@ class DPIBypassProxy:
     def _handle_http_request(self, client_sock: socket.socket, raw_req: bytes, target: str) -> None:
         """Обрабатывает входящий незашифрованный HTTP-запрос (порт 80).
         
-        Если клиент обращается по HTTP к заблокированному или whitelisted хосту (например, http://rutracker.org/),
-        немедленно возвращает HTTP 301 Moved Permanently на https://{host}{path},
-        чтобы браузер мгновенно перешел на HTTPS без зависания на дропах ТСПУ на 80 порту.
+        По умолчанию пересылает запрос. Переход на HTTPS для GET/HEAD
+        выполняется только при включённой настройке force_https.
         """
         target_sock = None
         try:
@@ -1169,7 +1097,8 @@ class DPIBypassProxy:
                 or "/ocsp" in lower_path
             )
 
-            if target_port == 80 and not is_ocsp_or_crl and (is_whitelisted or (not is_plain_ip(target_host) and not is_captive_portal_host(target_host))):
+            upgrade_requested = self.config.force_https and raw_req.partition(b' ')[0] in (b'GET', b'HEAD')
+            if upgrade_requested and target_port == 80 and not is_ocsp_or_crl and (is_whitelisted or (not is_plain_ip(target_host) and not is_captive_portal_host(target_host))):
                 if not path.startswith("/"):
                     path = "/" + path
                 host_part = f"[{target_host}]" if (":" in target_host and not target_host.startswith("[")) else target_host
@@ -1258,6 +1187,7 @@ class DPIBypassProxy:
     def _resolved_cache_key(self, host):
         """Адреса из DNS одной сети не переносятся в другую при смене профиля на лету."""
         network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
+
         return network, host.lower().rstrip('.')
 
     def _cloudflare_alternatives(self, network, port, candidates):
@@ -1265,7 +1195,7 @@ class DPIBypassProxy:
         prefixes = {ip.rsplit('.', 2)[0] for ip in candidates if ':' not in ip and is_cloudflare_anycast_ip(ip)}
         if not prefixes:
             return []
-        pool = [CLOUDFLARE_VERIFIED_EDGE_IP] + self.route_health.proven_ips(network, port)
+        pool = [CLOUDFLARE_FALLBACK_EDGE_IP] + self.route_health.proven_ips(network, port)
         return [ip for ip in dict.fromkeys(pool)
                 if ip not in candidates and ':' not in ip and is_cloudflare_anycast_ip(ip)
                 and ip.rsplit('.', 2)[0] in prefixes]
@@ -1282,9 +1212,6 @@ class DPIBypassProxy:
         
         Параметр exclude_ip позволяет ротировать IP при блокировках со стороны ТСПУ.
         """
-        if "dc-telemetry.net" in host.lower():
-            return None
-
         ipv6_enabled = getattr(getattr(self, "config", None), "ipv6_mode", "disabled") != "disabled"
         if ":" in host and not ipv6_enabled:
             return None
@@ -1307,22 +1234,14 @@ class DPIBypassProxy:
         health = getattr(self, 'route_health', None)
         network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
 
+        manual_ip = _configured_host_ip(host, getattr(self, 'config', None))
+        if manual_ip:
+            if manual_ip in excluded_set or not available(manual_ip):
+                return None
+            return self._try_direct_connect(manual_ip, port, timeout=conn_to)
+
         # 1. Zero-Latency Fast-Path: проверяем кэш известных рабочих IP
         cached_ip = _WORKING_IP_CACHE.get(host)
-        if cached_ip and is_googlevideo_host(host) and cached_ip in GOOGLE_EDGE_ANYCAST_IPS:
-            _WORKING_IP_CACHE.pop(host, None)
-            cached_ip = None
-        if cached_ip and is_google_or_youtube_host(host) and not is_googlevideo_host(host) and cached_ip in GOOGLE_VIDEO_ANYCAST_IPS:
-            _WORKING_IP_CACHE.pop(host, None)
-            cached_ip = None
-        if cached_ip and "discord" in str(host).lower():
-            h_low = str(host).lower()
-            if "cdn" in h_low and cached_ip not in DISCORD_CDN_ANYCAST_IPS:
-                _WORKING_IP_CACHE.pop(host, None)
-                cached_ip = None
-            elif ("media" in h_low or "images-ext" in h_low or "attachments" in h_low) and cached_ip not in DISCORD_MEDIA_ANYCAST_IPS:
-                _WORKING_IP_CACHE.pop(host, None)
-                cached_ip = None
         if cached_ip and not available(cached_ip):
             _WORKING_IP_CACHE.pop(host, None)
             cached_ip = None
@@ -1536,15 +1455,13 @@ class DPIBypassProxy:
             else:
                 target_discord_pool = DISCORD_CLOUDFLARE_ANYCAST_IPS
 
-            verified_candidates = [
+            fallback_candidates = [
                 ip for ip in target_discord_pool
                 if ip not in excluded_set and available(ip)
             ]
-            other_candidates = [
-                ip for ip in candidate_ips
-                if ip not in verified_candidates and ip not in excluded_set and available(ip)
-            ]
-            candidate_ips = verified_candidates + other_candidates if verified_candidates else other_candidates
+            # Список узлов — резервная подсказка, а не доказательство работоспособности.
+            # Сначала адреса DNS; выше их может поставить только наблюдение о передаче.
+            candidate_ips += [ip for ip in fallback_candidates if ip not in candidate_ips]
 
         if not candidate_ips:
             if is_googlevideo_host(host) and not is_plain_ip(host):
@@ -1585,90 +1502,6 @@ class DPIBypassProxy:
                 candidate_ips.append(host)
             else:
                 return None
-
-        # 4.1 Happy Eyeballs IP Rotation для Discord:
-        # Для Gateway и Core Web Discord (discord.com) приоритетом #1 ВСЕГДА являются доказанно
-        # работающие через ТСПУ узлы (162.159.134.234 для gateway и 162.159.136.232 для discord.com).
-        # Ротация на вторичные узлы выполняется ТОЛЬКО если первичный узел помечен как мертвый (dead).
-        # Для Media/CDN сначала используем тот же узел: остальные адреса могут пройти TLS,
-        # но зависнуть после 14–16 КБ. Мёртвые и явно исключённые адреса остаются вне выбора.
-        if (is_net_discord or is_discord_media_target) and len(candidate_ips) > 1:
-            global _DISCORD_IP_ROTATION_INDEX
-            is_gw_host = ("gateway" in h_disc or h_disc.endswith(".discord.gg") or h_disc == "discord.gg")
-            if is_gw_host:
-                pool = ["162.159.134.234", "162.159.136.234", "162.159.130.234", "162.159.133.234", "162.159.128.234"]
-                pinned_primary = "162.159.134.234"
-            elif is_core_discord or h_disc in ("discord.com", "www.discord.com"):
-                pool = [
-                    "162.159.136.232", "162.159.137.232", "162.159.138.232",
-                    "162.159.128.233", "162.159.129.233", "162.159.130.233"
-                ]
-                pinned_primary = "162.159.136.232"
-            elif h_disc.endswith("cdn.discordapp.com") or h_disc == "cdn.discordapp.com":
-                pool = DISCORD_CDN_ANYCAST_IPS
-                pinned_primary = "162.159.136.232"
-            elif "media" in h_disc or "images-ext" in h_disc or "attachments" in h_disc or is_discord_media_target:
-                pool = DISCORD_MEDIA_ANYCAST_IPS
-                pinned_primary = "162.159.136.232"
-            else:
-                pool = DISCORD_CLOUDFLARE_ANYCAST_IPS
-                pinned_primary = None
-            verified = [ip for ip in pool if ip in candidate_ips]
-            non_verified = [ip for ip in candidate_ips if ip not in verified]
-            if pinned_primary and pinned_primary in verified and available(pinned_primary):
-                other_v = [ip for ip in verified if ip != pinned_primary]
-                candidate_ips = [pinned_primary] + other_v + non_verified
-            elif verified:
-                fresh_v = [ip for ip in verified if ip not in _RECENT_DISCORD_IPS]
-                stale_v = [ip for ip in verified if ip in _RECENT_DISCORD_IPS]
-                with _DISCORD_IP_ROTATION_LOCK:
-                    is_media_flow = ("cdn" in h_disc or "media" in h_disc or "images-ext" in h_disc or "attachments" in h_disc or is_discord_media_target)
-                    golden_ips = (
-                        "162.159.130.233", "162.159.129.233", "162.159.133.233", "162.159.134.233", "162.159.128.233",
-                        "162.159.128.232", "162.159.129.232", "162.159.130.232", "162.159.136.232", "162.159.137.232"
-                    )
-                    if fresh_v:
-                        if is_media_flow:
-                            pref_v = [ip for ip in golden_ips if ip in fresh_v]
-                            tail_v = [ip for ip in fresh_v if ip not in pref_v and not ("162.159.135." in ip or (ip.startswith("162.159.134.") and not ip.endswith(".234")))]
-                        else:
-                            pref_v = [ip for ip in fresh_v if not ("162.159.135." in ip or (ip.startswith("162.159.134.") and not ip.endswith(".234")))]
-                            tail_v = [ip for ip in fresh_v if ip not in pref_v]
-                        if pref_v:
-                            _DISCORD_IP_ROTATION_INDEX = (_DISCORD_IP_ROTATION_INDEX + 1) % len(pref_v)
-                            rot = _DISCORD_IP_ROTATION_INDEX
-                            candidate_ips = pref_v[rot:] + pref_v[:rot] + tail_v + stale_v + non_verified
-                        else:
-                            _DISCORD_IP_ROTATION_INDEX = (_DISCORD_IP_ROTATION_INDEX + 1) % len(fresh_v)
-                            rot = _DISCORD_IP_ROTATION_INDEX
-                            candidate_ips = fresh_v[rot:] + fresh_v[:rot] + stale_v + non_verified
-                    else:
-                        if is_media_flow:
-                            pref_all = [ip for ip in golden_ips if ip in verified]
-                            tail_all = [ip for ip in verified if ip not in pref_all and not ("162.159.135." in ip or (ip.startswith("162.159.134.") and not ip.endswith(".234")))]
-                        else:
-                            pref_all = [ip for ip in verified if not ("162.159.135." in ip or (ip.startswith("162.159.134.") and not ip.endswith(".234")))]
-                            tail_all = [ip for ip in verified if ip not in pref_all]
-                        if pref_all:
-                            _DISCORD_IP_ROTATION_INDEX = (_DISCORD_IP_ROTATION_INDEX + 1) % len(pref_all)
-                            rot = _DISCORD_IP_ROTATION_INDEX
-                            candidate_ips = pref_all[rot:] + pref_all[:rot] + tail_all + non_verified
-                        else:
-                            _DISCORD_IP_ROTATION_INDEX = (_DISCORD_IP_ROTATION_INDEX + 1) % len(verified)
-                            rot = _DISCORD_IP_ROTATION_INDEX
-                            candidate_ips = verified[rot:] + verified[:rot] + non_verified
-            else:
-                fresh = [ip for ip in candidate_ips if ip not in _RECENT_DISCORD_IPS]
-                stale = [ip for ip in candidate_ips if ip in _RECENT_DISCORD_IPS]
-                with _DISCORD_IP_ROTATION_LOCK:
-                    if fresh:
-                        _DISCORD_IP_ROTATION_INDEX = (_DISCORD_IP_ROTATION_INDEX + 1) % len(fresh)
-                        rot = _DISCORD_IP_ROTATION_INDEX
-                        candidate_ips = fresh[rot:] + fresh[:rot] + stale
-                    else:
-                        _DISCORD_IP_ROTATION_INDEX = (_DISCORD_IP_ROTATION_INDEX + 1) % len(candidate_ips)
-                        rot = _DISCORD_IP_ROTATION_INDEX
-                        candidate_ips = candidate_ips[rot:] + candidate_ips[:rot]
 
         # Cloudflare обслуживает домен и на других узлах своей сети, а ТСПУ обрывает передачу
         # лишь на части адресов: при зависании адресов из DNS пробуем узлы той же /16,
@@ -2950,14 +2783,30 @@ class DPIBypassProxy:
                     self.strategy_engine.record_success(host, strategy, ip=target_ip)
 
 
-# Алиасы и вспомогательные функции для обратной совместимости модульных тестов:
+# Явные пользовательские сопоставления адресов; по умолчанию отключены.
+_USE_HOSTS_FILE = False
 
 def set_use_hosts_file(val: bool) -> None:
-    pass
+    """Совместимый переключатель для вызовов без объекта Config."""
+    global _USE_HOSTS_FILE
+    enabled = bool(val)
+    if enabled != _USE_HOSTS_FILE:
+        _DNS_CACHE.clear()
+        _RESOLVED_IPS_CACHE.clear()
+        _WORKING_IP_CACHE.clear()
+    _USE_HOSTS_FILE = enabled
+
+
+def _configured_host_ip(host, config=None):
+    if not _USE_HOSTS_FILE and getattr(config, 'use_hosts_file', False) is not True:
+        return None
+    config_path = getattr(config, 'config_path', 'config.ini')
+    path = os.path.join(os.path.dirname(os.path.abspath(config_path)), 'hosts.txt')
+    return load_custom_hosts(path).get(_normalized_host(host))
 
 def get_custom_host_ip(host: str) -> Optional[str]:
     hosts = load_custom_hosts()
-    return hosts.get(host)
+    return hosts.get(_normalized_host(host))
 
 def format_speed(bps: float) -> str:
     if bps >= 1024 * 1024:
@@ -2967,14 +2816,26 @@ def format_speed(bps: float) -> str:
     return f"{bps:.0f} B/s"
 
 def load_custom_hosts(filepath: str = "hosts.txt") -> Dict[str, str]:
+    """Читает стандартные строки IP/имена; недопустимые записи не применяются."""
+    hosts = {}
     try:
-        try:
-            from flowguard.config import load_custom_hosts as _lch
-        except ImportError:
-            from Floweryguard.config import load_custom_hosts as _lch
-        return _lch(filepath)
-    except Exception:
-        return {}
+        with open(filepath, encoding='utf-8') as stream:
+            for number, line in enumerate(stream, 1):
+                fields = line.split('#', 1)[0].split()
+                if len(fields) < 2:
+                    continue
+                try:
+                    address = str(ipaddress.ip_address(fields[0]))
+                except ValueError:
+                    logger.debug('Некорректный IP в %s, строка %s', filepath, number)
+                    continue
+                for name in fields[1:]:
+                    hosts[_normalized_host(name)] = address
+    except FileNotFoundError:
+        return hosts
+    except (OSError, UnicodeError) as error:
+        logger.warning('Не удалось прочитать %s: %s', filepath, error)
+    return hosts
 
 def is_plain_ip(host: Optional[str]) -> bool:
     if not host or not isinstance(host, str):

@@ -211,6 +211,7 @@ class TestLiveFixesYtDiscordRuTracker(unittest.TestCase):
 
     def test_http_301_redirect_for_whitelisted_host(self):
         """Незашифрованный HTTP-запрос (порт 80) к rutracker.org мгновенно перенаправляется на HTTPS 301."""
+        self.config.set_override('force_https', True)
         client_sock = MagicMock()
         raw_req = b"GET /forum/viewtopic.php?t=123 HTTP/1.1\r\nHost: rutracker.org\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
         target = "http://rutracker.org/forum/viewtopic.php?t=123"
@@ -226,6 +227,7 @@ class TestLiveFixesYtDiscordRuTracker(unittest.TestCase):
 
     def test_http_301_redirect_ipv6_host_bracketed(self):
         """HTTP 301 Location для IPv6 литерала обязан содержать квадратные скобки https://[IPv6]/path (RFC 3986)."""
+        self.config.set_override('force_https', True)
         client_sock = MagicMock()
         raw_req = b"GET /forum/index.php HTTP/1.1\r\nHost: [2a02:6b8::1]\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
         target = "http://[2a02:6b8::1]/forum/index.php"
@@ -241,6 +243,7 @@ class TestLiveFixesYtDiscordRuTracker(unittest.TestCase):
 
     def test_http_301_redirect_path_normalization(self):
         """HTTP 301 Location корректно нормализует путь без слэша (например, ?query=1 -> /?query=1)."""
+        self.config.set_override('force_https', True)
         client_sock = MagicMock()
         raw_req = b"GET http://rutracker.org?query=1 HTTP/1.1\r\nHost: rutracker.org\r\n\r\n"
         target = "http://rutracker.org?query=1"

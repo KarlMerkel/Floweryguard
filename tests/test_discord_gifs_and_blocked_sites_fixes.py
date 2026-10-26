@@ -43,13 +43,13 @@ class TestDiscordGifsAndBlockedSitesFixes(unittest.TestCase):
             "172.31.255.254",
             "127.0.0.1",
             "0.0.0.0",
-            "192.144.59.14",
-            "94.232.43.149",
         ]
         for ip in sinkhole_ips:
             self.assertTrue(is_bogon_or_sinkhole_ip(ip), f"IP {ip} must be detected as bogon/sinkhole")
 
         clean_ips = [
+            "192.144.59.14",
+            "94.232.43.149",
             "8.47.69.1",
             "8.47.69.254",
             "8.6.112.1",
@@ -136,6 +136,7 @@ class TestDiscordGifsAndBlockedSitesFixes(unittest.TestCase):
         """Проверяет Universal HTTP 301 Upgrade на порту 80 для обычных доменов и пропуск IP/NCSI."""
         handler = object.__new__(DPIBypassProxy)
         handler.config = MagicMock()
+        handler.config.force_https = True
         handler.config.ncsi_spoof = True
         handler.whitelist_domains = set()
         handler._whitelist_lock = MagicMock()
