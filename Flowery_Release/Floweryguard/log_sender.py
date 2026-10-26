@@ -175,11 +175,11 @@ class LogSender:
         proxy_port = 8118
         if self.config:
             try:
-                proxy_port = getattr(self.config, "listen_port", 8118)
+                proxy_port = self.config.proxy_port
             except Exception as e:
                 logger.debug("Failed reading listen_port from config: %s", e)
         proxy_url = f"http://127.0.0.1:{proxy_port}"
-        ssl_ctx = ssl._create_unverified_context()
+        ssl_ctx = ssl.create_default_context()
         proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
         opener_proxy = urllib.request.build_opener(proxy_handler, urllib.request.HTTPSHandler(context=ssl_ctx))
 
@@ -190,7 +190,9 @@ class LogSender:
             logger.debug("Opening URL via proxy %s failed, falling back to direct: %s", proxy_url, e)
 
         # 2. Если прокси недоступен, пробуем напрямую
-        direct_opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_ctx))
+        direct_opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ssl_ctx)
+        )
         with direct_opener.open(req, timeout=timeout) as resp:
             return resp.read()
 

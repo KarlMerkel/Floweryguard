@@ -39,7 +39,7 @@ def test_proxy_connection(proxy_host: str = "127.0.0.1", proxy_port: int = 8118)
     results = []
     proxy_url = f"http://{proxy_host}:{proxy_port}"
     import ssl
-    ssl_ctx = ssl._create_unverified_context()
+    ssl_ctx = ssl.create_default_context()
     proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
     https_handler = urllib.request.HTTPSHandler(context=ssl_ctx)
     opener = urllib.request.build_opener(proxy_handler, https_handler)
@@ -59,6 +59,9 @@ def test_proxy_connection(proxy_host: str = "127.0.0.1", proxy_port: int = 8118)
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             )
             with opener.open(req, timeout=10) as resp:
+                # Заголовки HTTP 200 приходят и при зависании после первых килобайт.
+                # Читаем до 64 КиБ или конца тела; таймаут считается ошибкой загрузки.
+                resp.read(65536)
                 elapsed = int((time.time() - start_time) * 1000)
                 code = resp.getcode()
                 status = "OK" if code in [200, 204, 301, 302] else f"HTTP {code}"
