@@ -451,9 +451,9 @@ class MTUManager:
             needs_v6 = (orig_v6 is not None and orig_v6 != self.target_mtu)
 
             if needs_v4 or needs_v6:
-                self.original_mtus[name] = current_mtu
+                self.original_mtus.setdefault(name, current_mtu)
                 if orig_v6 is not None:
-                    self.original_mtus_v6[name] = orig_v6
+                    self.original_mtus_v6.setdefault(name, orig_v6)
                 cmd_v4 = ["netsh", "interface", "ipv4", "set", "subinterface", name, f"mtu={self.target_mtu}", "store=active"]
                 cmd_v6 = ["netsh", "interface", "ipv6", "set", "subinterface", name, f"mtu={self.target_mtu}", "store=active"]
                 try:
@@ -467,7 +467,7 @@ class MTUManager:
                 except Exception as e:
                     logger.error(f"Исключение при установке MTU для '{name}': {e}")
 
-        self._applied = success
+        self._applied = self._applied or success
         return success
 
     def restore_mtu(self) -> bool:

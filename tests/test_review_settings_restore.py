@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from flowguard.system_proxy import SystemProxyManager
 from flowguard.dns_config import DNSManager
-from flowguard.ttl_fix import TTLManager
+from flowguard.ttl_fix import TTLManager, MTUManager
 from flowguard.main import FloweryApp
 
 
@@ -40,6 +40,24 @@ class TestSettingsRestore(unittest.TestCase):
              patch('flowguard.dns_config.os.remove'):
             self.assertTrue(manager.restore_dns())
         run.assert_not_called()
+
+    def test_repeated_mtu_apply_remains_restorable(self):
+        for second_target in (1380, 1400):
+            with self.subTest(second_target=second_target):
+                manager = MTUManager(target_mtu=1380)
+                with patch('flowguard.ttl_fix.is_admin', return_value=True), \
+                     patch('flowguard.ttl_fix.sys.platform', 'win32'), \
+                     patch.object(manager, 'get_active_interfaces', side_effect=[
+                         [('Ethernet', 1500)], [('Ethernet', 1380)],
+                     ]), \
+                     patch.object(manager, 'get_default_gateway_interfaces', return_value=['Ethernet']), \
+                     patch.object(manager, '_get_ipv6_mtu', side_effect=[1500, 1380]), \
+                     patch('flowguard.ttl_fix.subprocess.run', return_value=MagicMock(returncode=0)):
+                    self.assertTrue(manager.apply_mtu())
+                    manager.apply_mtu(second_target)
+                self.assertTrue(manager._applied)
+                self.assertEqual(manager.original_mtus, {'Ethernet': 1500})
+                self.assertEqual(manager.original_mtus_v6, {'Ethernet': 1500})
 
     def test_cleanup_restores_proxy_once_without_forced_reset(self):
         app = object.__new__(FloweryApp)
