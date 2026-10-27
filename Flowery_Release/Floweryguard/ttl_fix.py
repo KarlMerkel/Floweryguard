@@ -5,9 +5,17 @@
 import sys
 import os
 import ctypes
-import subprocess
+import subprocess  # noqa: F401 — точка подмены в тестах
 import winreg
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
+
+try:
+    from Floweryguard.logger import get_logger
+except ImportError:
+    from flowguard.logger import get_logger
+from flowguard.syscmd import run_command, succeeded
+
+logger = get_logger("TTL")
 
 TCPIP_PARAMS_KEY = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
 TCPIP6_PARAMS_KEY = r"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters"
@@ -18,7 +26,8 @@ def is_admin() -> bool:
     """Проверяет, запущен ли скрипт с правами администратора."""
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Ошибка проверки IsUserAnAdmin: {e}")
         return False
 
 
@@ -30,8 +39,10 @@ def check_admin_or_elevate(auto_elevate: bool = True) -> bool:
       выводит предупреждение и ЗАВЕРШАЕТ процесс. Приложение не открывается без прав админа!
     """
     if is_admin():
+        logger.debug("Права администратора подтверждены")
         return True
 
+    logger.warning("Процесс запущен без прав администратора")
     if auto_elevate and sys.platform == "win32":
         try:
             if getattr(sys, "frozen", False):
@@ -41,13 +52,19 @@ def check_admin_or_elevate(auto_elevate: bool = True) -> bool:
                 exe = sys.executable
                 params = f'"{os.path.abspath(sys.argv[0])}" ' + " ".join([f'"{arg}"' for arg in sys.argv[1:]])
 
+            app_base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            work_dir = os.path.dirname(exe) if getattr(sys, "frozen", False) else app_base
+            logger.info(f"Запрос повышения UAC (ShellExecuteW runas): {exe} {params} (cwd={work_dir})")
             # 1 = SW_SHOWNORMAL
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, work_dir, 1)
             if ret > 32:
                 # Повышенный процесс успешно запущен, непривилегированный родитель немедленно закрывается
+                logger.info(f"Elevated процесс успешно запущен (ret={ret}), родительский процесс завершается")
                 sys.exit(0)
-        except Exception:
-            pass
+            else:
+                logger.warning(f"ShellExecuteW runas вернул {ret} (пользователь отклонил UAC или ошибка)")
+        except Exception as e:
+            logger.error(f"Ошибка вызова ShellExecuteW runas: {e}")
 
     # Если права не получены или пользователь отклонил UAC запрос:
     err_title = "Flowery (Glue) — Доступ запрещён"
@@ -67,8 +84,17 @@ def check_admin_or_elevate(auto_elevate: bool = True) -> bool:
                     ctypes.windll.user32.MessageBoxTimeoutW(0, err_text, err_title, 0x10 | 0x0 | 0x10000, 0, 4000)
                 else:
                     ctypes.windll.user32.MessageBoxW(0, err_text, err_title, 0x10 | 0x0 | 0x10000)
-        except Exception:
-            pass
+            else:
+                try:
+                    input("Нажмите Enter для выхода...")
+                except Exception as e:
+                    logger.debug(f"Ошибка ожидания ввода пользователя: {e}")
+                    try:
+                        os.system("pause")
+                    except Exception as e2:
+                        logger.debug(f"Ошибка вызова pause: {e2}")
+        except Exception as e:
+            logger.debug(f"Ошибка отображения окна ошибки: {e}")
     sys.exit(1)
 
 
@@ -92,7 +118,8 @@ class TTLManager:
                 ttl_v4, _ = winreg.QueryValueEx(key, "DefaultTTL")
         except FileNotFoundError:
             ttl_v4 = None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ошибка чтения IPv4 DefaultTTL: {e}")
             ttl_v4 = None
 
         try:
@@ -100,7 +127,8 @@ class TTLManager:
                 ttl_v6, _ = winreg.QueryValueEx(key, "DefaultTTL")
         except FileNotFoundError:
             ttl_v6 = None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ошибка чтения IPv6 DefaultTTL: {e}")
             ttl_v6 = None
 
         return ttl_v4, ttl_v6
@@ -108,66 +136,330 @@ class TTLManager:
     def apply_ttl(self) -> bool:
         """Устанавливает целевое значение DefaultTTL (например, 65) и включает TCP timestamps."""
         if not is_admin():
+            logger.warning("apply_ttl: требуются права Администратора")
             print("[!] Требуются права Администратора для установки TTL!")
             return False
 
         try:
-            self.original_ttl_v4, self.original_ttl_v6 = self.get_current_ttl()
+            if not self._applied:
+                self.original_ttl_v4, self.original_ttl_v6 = self.get_current_ttl()
+            logger.info(f"Текущие значения TTL: IPv4={self.original_ttl_v4}, IPv6={self.original_ttl_v6}")
 
             with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, TCPIP_PARAMS_KEY, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, "DefaultTTL", 0, winreg.REG_DWORD, self.target_ttl)
+            logger.info(f"Установлен IPv4 DefaultTTL = {self.target_ttl}")
 
             try:
                 with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, TCPIP6_PARAMS_KEY, 0, winreg.KEY_SET_VALUE) as key:
                     winreg.SetValueEx(key, "DefaultTTL", 0, winreg.REG_DWORD, self.target_ttl)
-            except Exception:
-                pass
+                logger.info(f"Установлен IPv6 DefaultTTL = {self.target_ttl}")
+            except Exception as e:
+                logger.debug(f"Ошибка записи IPv6 DefaultTTL: {e}")
 
             if self.enable_timestamps:
-                creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                subprocess.run(
-                    ["netsh", "interface", "tcp", "set", "global", "timestamps=enabled"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                    check=False
-                )
+                res = run_command(["netsh", "interface", "tcp", "set", "global", "timestamps=enabled"])
+                logger.info(f"Включение TCP Timestamps: exit_code={res.returncode if res is not None else 'timeout'}")
 
             self._applied = True
             return True
         except Exception as e:
+            logger.error(f"Ошибка установки TTL в реестре: {e}")
             print(f"[!] Ошибка установки TTL в реестре: {e}")
             return False
 
     def restore_ttl(self) -> bool:
         """Восстанавливает исходные значения TTL."""
         if not self._applied or not is_admin():
+            logger.debug("restore_ttl: пропуск (не было применено или нет прав админа)")
             return False
 
         try:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, TCPIP_PARAMS_KEY, 0, winreg.KEY_SET_VALUE) as key:
                 if self.original_ttl_v4 is not None:
                     winreg.SetValueEx(key, "DefaultTTL", 0, winreg.REG_DWORD, self.original_ttl_v4)
+                    logger.info(f"Восстановлен IPv4 DefaultTTL = {self.original_ttl_v4}")
                 else:
                     try:
                         winreg.DeleteValue(key, "DefaultTTL")
+                        logger.info("Удален ключ IPv4 DefaultTTL (возврат к дефолту)")
                     except FileNotFoundError:
-                        pass
+                        logger.debug("Ключ IPv4 DefaultTTL уже отсутствует в реестре")
+                    except Exception as e:
+                        logger.debug(f"Ошибка удаления IPv4 DefaultTTL: {e}")
 
             try:
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, TCPIP6_PARAMS_KEY, 0, winreg.KEY_SET_VALUE) as key:
                     if self.original_ttl_v6 is not None:
                         winreg.SetValueEx(key, "DefaultTTL", 0, winreg.REG_DWORD, self.original_ttl_v6)
+                        logger.info(f"Восстановлен IPv6 DefaultTTL = {self.original_ttl_v6}")
                     else:
                         try:
                             winreg.DeleteValue(key, "DefaultTTL")
+                            logger.info("Удален ключ IPv6 DefaultTTL (возврат к дефолту)")
                         except FileNotFoundError:
-                            pass
-            except Exception:
-                pass
+                            logger.debug("Ключ IPv6 DefaultTTL уже отсутствует в реестре")
+                        except Exception as e:
+                            logger.debug(f"Ошибка удаления IPv6 DefaultTTL: {e}")
+            except Exception as e:
+                logger.debug(f"Ошибка доступа к ветке IPv6 параметров реестра: {e}")
 
             self._applied = False
             return True
         except Exception as e:
+            logger.error(f"Ошибка восстановления TTL: {e}")
             print(f"[!] Ошибка восстановления TTL: {e}")
             return False
+
+
+def _decode_netsh(raw_bytes: bytes) -> str:
+    """Безопасное декодирование системного вывода Windows (netsh)."""
+    if not raw_bytes:
+        return ""
+    try:
+        return raw_bytes.decode("utf-8")
+    except (UnicodeDecodeError, LookupError) as e:
+        logger.debug(f"netsh вывод не является UTF-8 ({e}), перебор альтернативных кодировок")
+
+    import locale
+    candidates = []
+    enc_list = ["cp866", "cp1251"]
+    pref = locale.getpreferredencoding()
+    if pref and pref.lower() not in ("cp866", "cp1251", "utf-8"):
+        enc_list.append(pref)
+
+    for enc in enc_list:
+        try:
+            txt = raw_bytes.decode(enc)
+            ru_letters = sum(1 for c in txt if 'а' <= c.lower() <= 'я' or c.lower() == 'ё')
+            bad_chars = sum(1 for c in txt if c in '─│┌┐└┘├┤┬┴┼═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬█▄▌▐▀ЃҐЇў¤­ №')
+            candidates.append((ru_letters - bad_chars * 2, enc, txt))
+        except Exception as e:
+            logger.debug(f"Ошибка декодирования netsh через {enc}: {e}")
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][2]
+    return raw_bytes.decode("latin1", errors="replace")
+
+
+class MTUManager:
+    """Управление MTU (Maximum Transmission Unit) для предотвращения фрагментации
+    и потерь пакетов при мобильной раздаче интернета (GTP/CGNAT tunnels).
+    """
+
+    def __init__(self, target_mtu: int = 1380):
+        self.target_mtu = target_mtu
+        self.original_mtus: Dict[str, int] = {}
+        self.original_mtus_v6: Dict[str, int] = {}
+        self._applied = False
+
+    def get_active_interfaces(self) -> List[Tuple[str, int]]:
+        """Определяет список активных подключенных интерфейсов и их текущий MTU."""
+        interfaces: List[Tuple[str, int]] = []
+        if sys.platform != "win32":
+            return interfaces
+
+        try:
+            proc = run_command(["netsh", "interface", "ipv4", "show", "subinterfaces"], capture=True)
+            raw = (proc.stdout if proc is not None else b"") or b""
+            text_out = _decode_netsh(raw)
+
+            for line in text_out.splitlines():
+                line = line.strip()
+                if not line or line.startswith("---") or "MTU" in line:
+                    continue
+                parts = line.split(maxsplit=4)
+                if len(parts) >= 5:
+                    try:
+                        mtu = int(parts[0])
+                        media_state = int(parts[1])
+                        name = parts[4].strip()
+                        # media_state == 1 означает подключенное состояние
+                        if media_state == 1 and not name.lower().startswith("loopback"):
+                            interfaces.append((name, mtu))
+                    except (ValueError, IndexError) as e:
+                        logger.debug(f"Ошибка парсинга строки MTU '{line}': {e}")
+                        continue
+            logger.info(f"Обнаружено активных сетевых интерфейсов: {len(interfaces)}: {interfaces}")
+        except Exception as e:
+            logger.error(f"Ошибка получения списка сетевых интерфейсов: {e}")
+        return interfaces
+
+    def _get_ipv6_mtu(self, iface_name: str) -> Optional[int]:
+        """Определяет текущий MTU IPv6 для интерфейса."""
+        if sys.platform != "win32":
+            return None
+        try:
+            proc = run_command(["netsh", "interface", "ipv6", "show", "subinterfaces"], capture=True)
+            raw = (proc.stdout if proc is not None else b"") or b""
+            text_out = _decode_netsh(raw)
+            for line in text_out.splitlines():
+                parts = line.strip().split(maxsplit=4)
+                if len(parts) >= 5 and parts[4].strip().lower() == iface_name.lower():
+                    return int(parts[0])
+        except Exception as e:
+            logger.debug(f"_get_ipv6_mtu for '{iface_name}' failed: {e}")
+        return None
+
+    def get_default_gateway_interfaces(self) -> List[str]:
+        """Определяет имена интерфейсов с активным маршрутом по умолчанию (Default Gateway / 0.0.0.0/0)."""
+        if sys.platform != "win32":
+            return []
+
+        default_names: List[str] = []
+
+        # Способ 1: через netsh interface ipv4 show route (префикс 0.0.0.0/0) + netsh show interfaces (индекс -> имя)
+        try:
+            proc_route = run_command(["netsh", "interface", "ipv4", "show", "route"], capture=True)
+            route_text = _decode_netsh((proc_route.stdout if proc_route is not None else b"") or b"")
+            default_idxs = set()
+            for line in route_text.splitlines():
+                parts = line.split()
+                if len(parts) >= 6 and "0.0.0.0/0" in parts:
+                    try:
+                        idx_val = parts[parts.index("0.0.0.0/0") + 1]
+                        default_idxs.add(idx_val)
+                    except (IndexError, ValueError):
+                        pass
+
+            if default_idxs:
+                proc_ifaces = run_command(["netsh", "interface", "ipv4", "show", "interfaces"], capture=True)
+                iface_text = _decode_netsh((proc_ifaces.stdout if proc_ifaces is not None else b"") or b"")
+                for line in iface_text.splitlines():
+                    parts = line.split(maxsplit=4)
+                    if len(parts) >= 5 and parts[0] in default_idxs:
+                        name = parts[4].strip()
+                        if name and name not in default_names:
+                            default_names.append(name)
+        except Exception as e:
+            logger.debug(f"get_default_gateway_interfaces: ошибка парсинга netsh route: {e}")
+
+        if default_names:
+            return default_names
+
+        # Способ 2: определение локального IP через UDP connect к 8.8.8.8 + поиск интерфейса по netsh ipaddresses
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1.0)
+            try:
+                s.connect(("8.8.8.8", 53))
+                local_ip = s.getsockname()[0]
+            finally:
+                s.close()
+
+            if local_ip and local_ip != "127.0.0.1":
+                proc_ips = run_command(["netsh", "interface", "ipv4", "show", "ipaddresses"], capture=True)
+                ips_text = _decode_netsh((proc_ips.stdout if proc_ips is not None else b"") or b"")
+                current_iface = None
+                for line in ips_text.splitlines():
+                    line_s = line.strip()
+                    if line_s.lower().startswith("interface ") or line_s.lower().startswith("интерфейс "):
+                        parts = line_s.split(":", 1)
+                        if len(parts) == 2:
+                            current_iface = parts[1].strip()
+                    elif current_iface and local_ip in line_s:
+                        if current_iface not in default_names:
+                            default_names.append(current_iface)
+                        break
+        except Exception as e:
+            logger.debug(f"get_default_gateway_interfaces: ошибка проверки через socket local IP: {e}")
+
+        return default_names
+
+    def apply_mtu(self, target_mtu: Optional[int] = None) -> bool:
+        """Устанавливает target_mtu (по умолчанию 1380) для сотовых/модемных адаптеров
+        и основного адаптера шлюза по умолчанию (в т.ч. тетеринг через Ethernet/RNDIS).
+        """
+        if not is_admin() or sys.platform != "win32":
+            logger.debug("apply_mtu: пропуск (не Windows или нет прав админа)")
+            return False
+
+        if target_mtu is not None:
+            self.target_mtu = target_mtu
+
+        active = self.get_active_interfaces()
+        if not active:
+            logger.warning("apply_mtu: активные интерфейсы не найдены")
+            return False
+
+        default_gateways = set(self.get_default_gateway_interfaces())
+        logger.info(f"MTUManager: Обнаружены основные интерфейсы шлюза по умолчанию: {default_gateways}")
+
+        success = False
+        for name, current_mtu in active:
+            n_low = name.lower()
+            # Проводные Ethernet-адаптеры и виртуальные адаптеры не должны урезаться по MTU,
+            # если они не являются основным шлюзом интернета / тетеринга,
+            # иначе сетевые онлайн-игры (Steam, сетевой мультиплеер) сбрасывают UDP-пакеты лобби (WSAEMSGSIZE).
+            is_cellular = any(m in n_low for m in ("rndis", "cell", "сотов", "lte", "modem", "broadband", "tether"))
+            is_virtual = any(v in n_low for v in (
+                "virtual", "vmware", "vbox", "hyper-v", "loopback", "wsl",
+                "radmin", "hamachi", "tap-", "tailscale", "zerotier", "wireguard", "vpn"
+            ))
+            is_wired = any(w in n_low for w in ("ethernet", "локальн"))
+            is_primary_gateway = name in default_gateways
+
+            # Виртуальные адаптеры никогда не урезаем
+            if is_virtual:
+                logger.debug(f"MTUManager: Пропуск интерфейса '{name}' (виртуальный адаптер, MTU={current_mtu} сохранен)")
+                continue
+
+            # Для проводных Ethernet-адаптеров: разрешаем MTU только если это основной шлюз (тетеринг через провод)
+            # или сотовый/модемный адаптер
+            if is_wired and not (is_cellular or is_primary_gateway):
+                logger.debug(f"MTUManager: Пропуск интерфейса '{name}' (второстепенный проводной Ethernet без шлюза, MTU={current_mtu} сохранен)")
+                continue
+
+            orig_v6 = self._get_ipv6_mtu(name)
+            needs_v4 = (current_mtu != self.target_mtu)
+            needs_v6 = (orig_v6 is not None and orig_v6 != self.target_mtu)
+
+            if needs_v4 or needs_v6:
+                known = name in self.original_mtus
+                self.original_mtus.setdefault(name, current_mtu)
+                if orig_v6 is not None:
+                    self.original_mtus_v6.setdefault(name, orig_v6)
+                cmd_v4 = ["netsh", "interface", "ipv4", "set", "subinterface", name, f"mtu={self.target_mtu}", "store=active"]
+                cmd_v6 = ["netsh", "interface", "ipv6", "set", "subinterface", name, f"mtu={self.target_mtu}", "store=active"]
+                res_v4 = run_command(cmd_v4)
+                res_v6 = run_command(cmd_v6) if orig_v6 is not None else None
+                if succeeded(res_v4) or succeeded(res_v6):
+                    success = True
+                    logger.info(f"Установлен MTU={self.target_mtu} (IPv4/IPv6) для интерфейса '{name}' (было: v4={current_mtu}, v6={orig_v6})")
+                else:
+                    logger.warning(f"Ошибка netsh set MTU для '{name}': "
+                                   f"exit_v4={getattr(res_v4, 'returncode', 'timeout')}, exit_v6={getattr(res_v6, 'returncode', None)}")
+                    # Явный отказ обеих команд: интерфейс не менялся, снимок не нужен
+                    if not known and res_v4 is not None and (orig_v6 is None or res_v6 is not None):
+                        self.original_mtus.pop(name, None)
+                        self.original_mtus_v6.pop(name, None)
+
+        self._applied = bool(self.original_mtus)
+        return success
+
+    def restore_mtu(self) -> bool:
+        """Восстанавливает исходный MTU для модифицированных интерфейсов."""
+        if not self._applied or sys.platform != "win32" or not is_admin():
+            logger.debug("restore_mtu: пропуск (не было применено или нет прав админа)")
+            return False
+
+        all_ok = True
+        for name, orig_mtu in list(self.original_mtus.items()):
+            orig_v6 = self.original_mtus_v6.get(name)
+            cmd_v4 = ["netsh", "interface", "ipv4", "set", "subinterface", name, f"mtu={orig_mtu}", "store=active"]
+            ok = succeeded(run_command(cmd_v4))
+            if orig_v6 is not None:
+                cmd_v6 = ["netsh", "interface", "ipv6", "set", "subinterface", name, f"mtu={orig_v6}", "store=active"]
+                ok = succeeded(run_command(cmd_v6)) and ok
+            if ok:
+                # Снимок удаляется только после подтверждённого отката
+                self.original_mtus.pop(name, None)
+                self.original_mtus_v6.pop(name, None)
+                logger.info(f"Восстановлен MTU v4={orig_mtu}, v6={orig_v6} для интерфейса '{name}'")
+            else:
+                all_ok = False
+                logger.warning(f"MTU интерфейса '{name}' не восстановлен; снимок сохранён для повторной попытки")
+
+        self._applied = bool(self.original_mtus)
+        return all_ok

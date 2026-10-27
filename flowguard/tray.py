@@ -9,8 +9,15 @@ import sys
 import ctypes
 from ctypes import wintypes
 import threading
-import time
+import logging
 from typing import Optional, Callable
+
+try:
+    from flowguard import __version__
+except Exception:
+    __version__ = "1.3.0"
+
+logger = logging.getLogger("Flowery.Tray")
 
 # Win32 константы
 WM_USER = 0x0400
@@ -21,6 +28,10 @@ WM_COMMAND = 0x0111
 WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
 WM_NULL = 0x0000
+WM_POWERBROADCAST = 0x0218
+PBT_APMSUSPEND = 0x0004
+PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_APMRESUMESUSPEND = 0x0007
 
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
@@ -132,7 +143,7 @@ if sys.platform == "win32":
     user32.CreatePopupMenu.restype = wintypes.HMENU
     user32.TrackPopupMenuEx.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.HWND, wintypes.LPVOID]
     user32.TrackPopupMenuEx.restype = wintypes.BOOL
-    user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_uint64, wintypes.LPCWSTR]
+    user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
     user32.AppendMenuW.restype = wintypes.BOOL
     user32.DestroyMenu.argtypes = [wintypes.HMENU]
     user32.DestroyMenu.restype = wintypes.BOOL
@@ -158,11 +169,13 @@ class FloweryTrayIcon:
         self,
         app_name: str = "Flowery (Glue)",
         on_exit_callback: Optional[Callable[[], None]] = None,
-        get_profile_name_callback: Optional[Callable[[], str]] = None
+        get_profile_name_callback: Optional[Callable[[], str]] = None,
+        on_power_event_callback: Optional[Callable[[int], None]] = None
     ):
         self.app_name = app_name
         self.on_exit_callback = on_exit_callback
         self.get_profile_name_callback = get_profile_name_callback
+        self.on_power_event_callback = on_power_event_callback
 
         self.hwnd = None
         self.h_icon = None
@@ -171,6 +184,7 @@ class FloweryTrayIcon:
         self._wnd_proc_ref = None
         self._wm_taskbar_created = 0
         self._nid: Optional[NOTIFYICONDATAW] = None
+        self._h_power_notify = None
 
     def start(self, hide_console: bool = False) -> bool:
         """Запускает поток обработки сообщений трея."""
@@ -192,10 +206,11 @@ class FloweryTrayIcon:
                 self._message_loop()
             except Exception as e:
                 try:
-                    from Floweryguard.logger import logger
-                    logger.error(f"[Tray] Ошибка в потоке трея: {e}")
+                    from flowguard.logger import logger
                 except Exception:
-                    pass
+                    logger = None
+                if logger:
+                    logger.error(f"[Tray] Ошибка в потоке трея: {e}")
                 started_event.set()
                 self.is_running = False
 
@@ -223,16 +238,24 @@ class FloweryTrayIcon:
                         if event == WM_LBUTTONDBLCLK:
                             self.toggle_console_window()
                         return 0
+                elif msg == WM_POWERBROADCAST:
+                    if self.on_power_event_callback:
+                        try:
+                            self.on_power_event_callback(wparam)
+                        except Exception as pe:
+                            logger.error("Error in on_power_event_callback: %s", pe)
+                    return 1
                 elif msg == WM_COMMAND:
                     cmd_id = wparam & 0xFFFF
                     if cmd_id == ID_TRAY_TOGGLE_CONSOLE:
                         self.toggle_console_window()
                     elif cmd_id == ID_TRAY_OPEN_LOG:
                         try:
-                            from Floweryguard.logger import open_current_log_file
-                            open_current_log_file()
+                            from flowguard.logger import open_current_log_file
                         except Exception:
-                            pass
+                            open_current_log_file = None
+                        if open_current_log_file:
+                            open_current_log_file()
                     elif cmd_id == ID_TRAY_EXIT:
                         self.stop()
                         if self.on_exit_callback:
@@ -242,7 +265,8 @@ class FloweryTrayIcon:
                     user32.PostQuitMessage(0)
                     return 0
                 return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-            except Exception:
+            except Exception as e:
+                logger.error("WndProc encountered exception: %s", e)
                 try:
                     return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
                 except Exception:
@@ -273,8 +297,8 @@ class FloweryTrayIcon:
                         self.h_icon = user32.LoadImageW(None, p, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
                         if self.h_icon:
                             break
-                    except Exception:
-                        pass
+                    except Exception as ie:
+                        logger.debug("LoadImageW failed for %s: %s", p, ie)
 
         if not self.h_icon:
             IDI_APPLICATION = 32512
@@ -294,6 +318,16 @@ class FloweryTrayIcon:
             0, 0, 0, 0, 0, None, None, h_inst, None
         )
 
+        # Регистрация уведомлений о сне и гибернации (Windows 8+)
+        try:
+            DEVICE_NOTIFY_WINDOW_HANDLE = 0
+            user32.RegisterSuspendResumeNotification.argtypes = [wintypes.HWND, wintypes.DWORD]
+            user32.RegisterSuspendResumeNotification.restype = wintypes.HANDLE
+            self._h_power_notify = user32.RegisterSuspendResumeNotification(self.hwnd, DEVICE_NOTIFY_WINDOW_HANDLE)
+        except Exception as se:
+            logger.debug("RegisterSuspendResumeNotification not supported/failed: %s", se)
+            self._h_power_notify = None
+
         self._add_tray_icon()
 
     def _add_tray_icon(self) -> None:
@@ -308,7 +342,7 @@ class FloweryTrayIcon:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
         nid.hIcon = self.h_icon
-        nid.szTip = f"{self.app_name} — DPI Bypass Active"
+        nid.szTip = f"{self.app_name} — Обход DPI активен"
         self._nid = nid
 
         # Сначала пробуем добавить; если уже была (после краша) — удаляем и добавляем заново
@@ -324,7 +358,7 @@ class FloweryTrayIcon:
         h_menu = user32.CreatePopupMenu()
 
         # Заголовок (неактивный пункт)
-        user32.AppendMenuW(h_menu, MF_STRING | MF_DISABLED | MF_GRAYED, ID_TRAY_TITLE, f"{self.app_name} v1.2.0")
+        user32.AppendMenuW(h_menu, MF_STRING | MF_DISABLED | MF_GRAYED, ID_TRAY_TITLE, f"{self.app_name} v{__version__}")
         
         # Информация о профиле
         prof_name = self.get_profile_name_callback() if self.get_profile_name_callback else "Активен"
@@ -399,12 +433,20 @@ class FloweryTrayIcon:
             nid.uFlags = NIF_TIP
             nid.szTip = text[:127]
             shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
-        except Exception:
-            pass
+        except Exception as te:
+            logger.debug("Failed updating tray tooltip: %s", te)
 
     def stop(self) -> None:
         """Удаляет иконку из трея и завершает работу."""
         self.is_running = False
+        if hasattr(self, "_h_power_notify") and self._h_power_notify and user32:
+            try:
+                user32.UnregisterSuspendResumeNotification.argtypes = [wintypes.HANDLE]
+                user32.UnregisterSuspendResumeNotification.restype = wintypes.BOOL
+                user32.UnregisterSuspendResumeNotification(self._h_power_notify)
+                self._h_power_notify = None
+            except Exception as ue:
+                logger.debug("UnregisterSuspendResumeNotification failed: %s", ue)
         if self.hwnd and shell32:
             try:
                 nid = NOTIFYICONDATAW()
@@ -412,9 +454,10 @@ class FloweryTrayIcon:
                 nid.hWnd = self.hwnd
                 nid.uID = 1
                 shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
-            except Exception:
-                pass
-            try:
-                user32.PostMessageW(self.hwnd, WM_DESTROY, 0, 0)
-            except Exception:
-                pass
+            except Exception as de:
+                logger.debug("Shell_NotifyIconW delete failed: %s", de)
+            if user32:
+                try:
+                    user32.PostMessageW(self.hwnd, WM_DESTROY, 0, 0)
+                except Exception as pe:
+                    logger.debug("PostMessageW WM_DESTROY failed: %s", pe)

@@ -7,6 +7,13 @@ import winreg
 import ctypes
 from typing import Optional, Tuple
 
+try:
+    from Floweryguard.logger import get_logger
+except ImportError:
+    from flowguard.logger import get_logger
+
+logger = get_logger("SystemProxy")
+
 INTERNET_SETTINGS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 INTERNET_OPTION_SETTINGS_CHANGED = 39
 INTERNET_OPTION_REFRESH = 37
@@ -18,7 +25,9 @@ def refresh_system_proxy_settings() -> None:
         wininet = ctypes.windll.wininet
         wininet.InternetSetOptionW(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
         wininet.InternetSetOptionW(0, INTERNET_OPTION_REFRESH, 0, 0)
+        logger.debug("Настройки WinINet успешно обновлены")
     except Exception as e:
+        logger.warning(f"Не удалось обновить WinINet настройки: {e}")
         print(f"[!] Не удалось обновить WinINet настройки: {e}")
 
 
@@ -44,7 +53,60 @@ def build_proxy_override(proxy_discord: bool = True, proxy_youtube: bool = True)
             "*.ytimg.com", "ytimg.com", "youtu.be"
         ])
 
-    overrides.extend(["127.0.0.1", "127.*", "localhost", "::1", "<local>"])
+    # Игровые платформы, Steam, Sony PlayStation, PlayFab и GameGuard (в обход прокси)
+    overrides.extend([
+        "*.steampowered.com", "steampowered.com",
+        "*.steamcommunity.com", "steamcommunity.com",
+        "*.steamcontent.com", "steamcontent.com",
+        "*.steamstatic.com", "steamstatic.com",
+        "*.steamserver.net", "steamserver.net",
+        "*.steam-chat.com", "steam-chat.com",
+        "*.steamgames.com", "steamgames.com",
+        "*.steamusercontent.com", "steamusercontent.com",
+        "*.valve.net", "valve.net",
+        "*.valvesoftware.com", "valvesoftware.com",
+        "*.playstation.com", "playstation.com",
+        "*.playstation.net", "playstation.net",
+        "*.playstationnetwork.com", "playstationnetwork.com",
+        "*.sony.com", "sony.com",
+        "*.sonyentertainmentnetwork.com", "sonyentertainmentnetwork.com",
+        "*.playfabapi.com", "playfabapi.com",
+        "*.playfab.com", "playfab.com",
+        "*.playfab.net", "playfab.net",
+        "*.trafficmanager.net", "trafficmanager.net",
+        "*.arrowheadgs.com", "arrowheadgs.com",
+        "*.helldivers2.dev", "helldivers2.dev",
+        "*.nprotect.net", "nprotect.net",
+        "*.nprotect.com", "nprotect.com",
+        "*.inca.co.kr", "inca.co.kr",
+        "*.gameguard.des", "gameguard.des",
+        "*.gameguard.co.kr", "gameguard.co.kr",
+        "*.battleye.com", "battleye.com",
+        "*.easyanticheat.net", "easyanticheat.net",
+        "*.epicgames.com", "epicgames.com",
+        "*.ea.com", "ea.com",
+        "*.ubisoft.com", "ubisoft.com",
+        "*.riotgames.com", "riotgames.com",
+        "*.battle.net", "battle.net",
+    ])
+
+    # Telegram (MTProto DC, Web, API - не блокируется, идет напрямую без прокси)
+    overrides.extend([
+        "*.telegram.org", "telegram.org",
+        "*.t.me", "t.me",
+        "*.telegra.ph", "telegra.ph",
+        "*.tdesktop.com", "tdesktop.com",
+        "149.154.*", "91.108.*"
+    ])
+
+    # Приватные адреса локальных сетей (RFC 1918) и loopback:
+    overrides.extend([
+        "127.0.0.1", "127.*", "localhost", "::1", "<local>",
+        "10.*", "192.168.*",
+        "172.16.*", "172.17.*", "172.18.*", "172.19.*", "172.20.*", "172.21.*",
+        "172.22.*", "172.23.*", "172.24.*", "172.25.*", "172.26.*", "172.27.*",
+        "172.28.*", "172.29.*", "172.30.*", "172.31.*"
+    ])
     return ";".join(overrides)
 
 
@@ -69,16 +131,23 @@ class SystemProxyManager:
                 try:
                     enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
                 except FileNotFoundError:
-                    pass
+                    logger.debug("Значение ProxyEnable не найдено в реестре (используется 0)")
+                except Exception as e:
+                    logger.debug(f"Ошибка чтения ProxyEnable: {e}")
                 try:
                     server, _ = winreg.QueryValueEx(key, "ProxyServer")
                 except FileNotFoundError:
-                    pass
+                    logger.debug("Значение ProxyServer не найдено в реестре (пустая строка)")
+                except Exception as e:
+                    logger.debug(f"Ошибка чтения ProxyServer: {e}")
                 try:
                     override, _ = winreg.QueryValueEx(key, "ProxyOverride")
                 except FileNotFoundError:
-                    pass
+                    logger.debug("Значение ProxyOverride не найдено в реестре (пустая строка)")
+                except Exception as e:
+                    logger.debug(f"Ошибка чтения ProxyOverride: {e}")
         except Exception as e:
+            logger.error(f"Ошибка чтения настроек прокси: {e}")
             print(f"[!] Ошибка чтения настроек прокси: {e}")
         return enable, server, override
 
@@ -90,16 +159,19 @@ class SystemProxyManager:
         # Проверяем, запущен ли реальный процесс прокси на этом адресе:порту
         try:
             import socket
-            host, port_str = self.proxy_address.split(":")
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            host, port_str = self.proxy_address.rsplit(":", 1)
+            host = host.strip("[]")
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            s = socket.socket(family, socket.SOCK_STREAM)
             s.settimeout(0.2)
             res = s.connect_ex((host, int(port_str)))
             s.close()
             if res == 0:
                 # Прокси активен и принимает соединения — он не брошен!
                 return False
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"is_stale_proxy_present socket check error: {e}")
+        logger.warning(f"Обнаружен зависший системный прокси: {server}")
         return True
 
     def enable(self) -> bool:
@@ -108,14 +180,15 @@ class SystemProxyManager:
             cur_enable, cur_server, cur_override = self.get_current_settings()
 
             # Защита от сохранения нашего же прокси как 'оригинального' при падении прошлой сессии
-            if cur_server and self.proxy_address in cur_server:
-                self.original_enable = 0
-                self.original_server = None
-                self.original_override = None
-            else:
-                self.original_enable = cur_enable
-                self.original_server = cur_server
-                self.original_override = cur_override
+            if not self._is_active:
+                if cur_server and self.proxy_address in cur_server:
+                    self.original_enable = 0
+                    self.original_server = None
+                    self.original_override = None
+                else:
+                    self.original_enable = cur_enable
+                    self.original_server = cur_server
+                    self.original_override = cur_override
 
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, INTERNET_SETTINGS_KEY, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
@@ -124,10 +197,22 @@ class SystemProxyManager:
 
             refresh_system_proxy_settings()
             self._is_active = True
+            logger.info(f"Системный прокси Windows включен: {self.proxy_address}")
             return True
         except Exception as e:
+            logger.error(f"Ошибка включения системного прокси: {e}")
             print(f"[!] Ошибка включения системного прокси: {e}")
             return False
+
+    def ensure_active(self) -> bool:
+        """Проверяет и восстанавливает активность системного прокси, если Windows или сторонний софт отключили его (например, при выходе из сна/гибернации)."""
+        enable, server, override = self.get_current_settings()
+        if enable != 1 or not server or self.proxy_address not in server:
+            logger.info("ensure_active: прокси был отключен внешним событием, повторное включение")
+            return self.enable()
+        # Даже если флаг в реестре стоит, освежаем кэш WinINet после пробуждения
+        refresh_system_proxy_settings()
+        return True
 
     def disable(self, force: bool = False) -> bool:
         """Отключает системный прокси и возвращает оригинальные настройки."""
@@ -145,7 +230,9 @@ class SystemProxyManager:
                     try:
                         winreg.DeleteValue(key, "ProxyServer")
                     except FileNotFoundError:
-                        pass
+                        logger.debug("ProxyServer уже отсутствует в реестре")
+                    except Exception as e:
+                        logger.debug(f"Ошибка удаления ProxyServer: {e}")
 
                 if self.original_override:
                     winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, self.original_override)
@@ -153,12 +240,16 @@ class SystemProxyManager:
                     try:
                         winreg.DeleteValue(key, "ProxyOverride")
                     except FileNotFoundError:
-                        pass
+                        logger.debug("ProxyOverride уже отсутствует в реестре")
+                    except Exception as e:
+                        logger.debug(f"Ошибка удаления ProxyOverride: {e}")
 
             refresh_system_proxy_settings()
             self._is_active = False
+            logger.info("Системный прокси Windows успешно отключен")
             return True
         except Exception as e:
+            logger.error(f"Ошибка отключения системного прокси: {e}")
             print(f"[!] Ошибка отключения системного прокси: {e}")
             return False
 
@@ -171,11 +262,15 @@ class SystemProxyManager:
                     cur_server, _ = winreg.QueryValueEx(key, "ProxyServer")
                     if cur_server and self.proxy_address in cur_server:
                         winreg.DeleteValue(key, "ProxyServer")
-                except Exception:
-                    pass
+                except FileNotFoundError:
+                    logger.debug("force_cleanup: ProxyServer уже отсутствует в реестре")
+                except Exception as e:
+                    logger.debug(f"force_cleanup: ошибка удаления ProxyServer: {e}")
             refresh_system_proxy_settings()
             self._is_active = False
+            logger.info("Принудительный сброс настроек системного прокси выполнен успешно")
             return True
         except Exception as e:
+            logger.error(f"Ошибка принудительного сброса прокси: {e}")
             print(f"[!] Ошибка принудительного сброса прокси: {e}")
             return False
