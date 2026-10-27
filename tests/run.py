@@ -74,6 +74,8 @@ def main():
     source = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="flowery-tests-") as directory:
         root = Path(directory)
+        if (source / 'prepare_release.py').exists():
+            shutil.copy2(source / 'prepare_release.py', root / 'prepare_release.py')
         for name in ("flowguard", "Floweryguard", "tests", "zapret_bin"):
             shutil.copytree(source / name, root / name, ignore=shutil.ignore_patterns("__pycache__", "*.log"))
         release = root / "Flowery_Release"

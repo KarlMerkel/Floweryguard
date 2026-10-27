@@ -5,8 +5,8 @@ from pathlib import Path
 root = Path(SPECPATH)
 modules = ['flowguard.' + path.stem for path in (root / 'flowguard').glob('*.py')
            if path.stem != '__init__']
-assets = [(str(root / name), '.') for name in ('hosts.txt', 'whitelist.txt', 'icon.ico', 'icon.png')]
-assets += [(str(root / 'packaging' / name), '.') for name in ('config.ini', 'network_profiles.json')]
+assets = [(str(root / name), '.') for name in ('whitelist.txt', 'icon.ico', 'icon.png')]
+assets += [(str(root / 'packaging' / name), '.') for name in ('config.ini', 'network_profiles.json', 'hosts.txt')]
 assets += [(str(path), 'zapret_bin') for path in (root / 'zapret_bin').iterdir()
            if path.suffix.lower() in ('.exe', '.dll', '.sys', '.bin')]
 
