@@ -56,6 +56,8 @@ class RouteHealth:
         self._max_entries = max_entries
         self._entries = OrderedDict()
         self._strategies = OrderedDict()
+        self._attempts = OrderedDict()
+        self._exploration = OrderedDict()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -72,6 +74,23 @@ class RouteHealth:
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
+            scope = key[:3]
+            if outcome == 'suspect':
+                self._exploration[scope] = self._clock() + 300.0
+                self._exploration.move_to_end(scope)
+                while len(self._exploration) > self._max_entries:
+                    self._exploration.popitem(last=False)
+            else:
+                self._exploration.pop(scope, None)
+
+    def note_attempt(self, network, host, port, ip):
+        """Помнит порядок проб, не объявляя доступный TCP успешной передачей."""
+        key = self._key(network, host, port, ip)
+        with self._lock:
+            self._attempts[key] = self._clock()
+            self._attempts.move_to_end(key)
+            while len(self._attempts) > self._max_entries:
+                self._attempts.popitem(last=False)
 
     def status(self, network, host, port, ip):
         key = self._key(network, host, port, ip)
@@ -96,6 +115,8 @@ class RouteHealth:
         with self._lock:
             self._entries.clear()
             self._strategies.clear()
+            self._attempts.clear()
+            self._exploration.clear()
 
     def record_strategy(self, network, host, port, ip, strategy, outcome):
         """Короткая подсказка для нового подключения, без штрафа общей статистики."""
@@ -123,6 +144,23 @@ class RouteHealth:
         return self._strategy_observations(network, host, port, ip, 'progress')
 
     def rank(self, network, host, port, candidates):
-        """Стабильный порядок: передавшие данные, неизвестные, подозрительные."""
+        """После сбоя неизвестные узлы пробуются до повторов уже испробованных."""
         priority = {'progress': 0, 'unknown': 1, 'suspect': 2}
-        return sorted(candidates, key=lambda ip: priority[self.status(network, host, port, ip)])
+        now = self._clock()
+        scope = (network, host.lower().rstrip('.'), port)
+        with self._lock:
+            exploring = self._exploration.get(scope, 0) > now
+            if not exploring:
+                self._exploration.pop(scope, None)
+
+            def order(ip):
+                key = scope + (ip,)
+                state, expires = self._entries.get(key, ('unknown', 0))
+                if expires <= now:
+                    state = 'unknown'
+                attempted = self._attempts.get(key) if exploring else None
+                if attempted is not None and now - attempted >= 300.0:
+                    attempted = None
+                return priority[state], attempted is not None, attempted or 0
+
+            return sorted(candidates, key=order)

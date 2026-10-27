@@ -1234,6 +1234,10 @@ class DPIBypassProxy:
         health = getattr(self, 'route_health', None)
         network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
 
+        def note_attempt(ip):
+            if health:
+                health.note_attempt(network, host, port, ip)
+
         manual_ip = _configured_host_ip(host, getattr(self, 'config', None))
         if manual_ip:
             if manual_ip in excluded_set or not available(manual_ip):
@@ -1517,6 +1521,7 @@ class DPIBypassProxy:
         # 5. Если кандидат всего один - прямое подключение
         if len(candidate_ips) == 1:
             primary_ip = candidate_ips[0]
+            note_attempt(primary_ip)
             s = None
             has_doh = not is_plain_ip(host) and bool(self.dns_failover or self.doh_harvester or getattr(getattr(self, "config", None), "enable_custom_dns", False))
             primary_to = min(1.5, conn_to) if has_doh else conn_to
@@ -1563,6 +1568,7 @@ class DPIBypassProxy:
 
                 if doh_candidates:
                     for dip in doh_candidates:
+                        note_attempt(dip)
                         s_doh = None
                         try:
                             f_doh = socket.AF_INET6 if ":" in dip else socket.AF_INET
@@ -1590,6 +1596,7 @@ class DPIBypassProxy:
                     if isinstance(fallback_ip, (list, tuple)):
                         fallback_ip = fallback_ip[0] if fallback_ip else None
                     if fallback_ip and fallback_ip != primary_ip and fallback_ip not in excluded_set and available(fallback_ip):
+                        note_attempt(fallback_ip)
                         s2 = None
                         try:
                             family2 = socket.AF_INET6 if ":" in fallback_ip else socket.AF_INET
@@ -1617,6 +1624,7 @@ class DPIBypassProxy:
         end_time = time.time() + conn_to
 
         for i, target_ip in enumerate(candidate_ips):
+            note_attempt(target_ip)
             s = None
             try:
                 family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
@@ -1804,6 +1812,7 @@ class DPIBypassProxy:
                 pass
 
         for dip in doh_candidates:
+            note_attempt(dip)
             s_doh = None
             try:
                 family_doh = socket.AF_INET6 if ":" in dip else socket.AF_INET
