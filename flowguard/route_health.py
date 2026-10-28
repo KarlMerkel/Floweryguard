@@ -51,6 +51,8 @@ class TransferProgress:
 class RouteHealth:
     """Ограниченный потокобезопасный кэш наблюдений по сети, хосту, порту и IP."""
 
+    EXPLORATION_TTL = 300.0
+
     def __init__(self, clock=time.monotonic, max_entries=1024):
         self._clock = clock
         self._max_entries = max_entries
@@ -76,7 +78,7 @@ class RouteHealth:
                 self._entries.popitem(last=False)
             scope = key[:3]
             if outcome == 'suspect':
-                self._exploration[scope] = self._clock() + 300.0
+                self._exploration[scope] = self._clock() + self.EXPLORATION_TTL
                 self._exploration.move_to_end(scope)
                 while len(self._exploration) > self._max_entries:
                     self._exploration.popitem(last=False)
@@ -123,7 +125,9 @@ class RouteHealth:
         if not host or not ip or not strategy or outcome not in ('progress', 'suspect'):
             return
         key = (network, host.lower().rstrip('.'), port, ip, strategy)
-        expires = self._clock() + (300.0 if outcome == 'progress' else 45.0)
+        # Память о технике должна переживать круг перебора адресов. Короткий
+        # штраф IP истекает отдельно: узел можно повторить с другой техникой.
+        expires = self._clock() + self.EXPLORATION_TTL
         with self._lock:
             self._strategies[key] = (outcome, expires)
             self._strategies.move_to_end(key)
@@ -159,7 +163,7 @@ class RouteHealth:
                 if expires <= now:
                     state = 'unknown'
                 attempted = self._attempts.get(key) if exploring else None
-                if attempted is not None and now - attempted >= 300.0:
+                if attempted is not None and now - attempted >= self.EXPLORATION_TTL:
                     attempted = None
                 return priority[state], attempted is not None, attempted or 0
 

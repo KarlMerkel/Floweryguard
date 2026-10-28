@@ -46,6 +46,8 @@ class TestStalledStrategy(unittest.TestCase):
         self.assertEqual(self.choose(), 'combo_tlsrec_tcpsplit')
         self.proxy.strategy_engine.set_network_context('wifi')
         self.now += 46
+        self.assertNotEqual(self.choose(), 'combo_tlsrec_tcpsplit')
+        self.now += 255
         self.assertEqual(self.choose(), 'combo_tlsrec_tcpsplit')
 
     def test_success_keeps_alternative_after_suspicion_expires(self):
@@ -95,6 +97,21 @@ class TestStalledStrategy(unittest.TestCase):
         self.record()
         selected = self.proxy._strategy_after_stall(self.host, 443, '192.0.2.2', 'combo_tlsrec_tcpsplit')
         self.assertEqual(selected, 'combo_tlsrec_tcpsplit')
+
+    def test_full_address_sweep_does_not_forget_failed_technique(self):
+        # Один круг из 11 адресов по 15 секунд длиннее короткого штрафа IP.
+        # На следующем круге нужно проверить другую технику, а не начать заново.
+        self.proxy.route_health = RouteHealth(clock=lambda: self.now)
+        for i in range(1, 12):
+            ip = '192.0.2.' + str(i)
+            self.proxy.route_health.note_attempt('wifi', self.host, 443, ip)
+            self.proxy.route_health.record('wifi', self.host, 443, ip, 'suspect')
+            self.proxy.route_health.record_strategy(
+                'wifi', self.host, 443, ip, 'combo_tlsrec_tcpsplit', 'suspect')
+            self.now += 15
+        self.assertEqual(self.proxy.route_health.status(
+            'wifi', self.host, 443, '192.0.2.1'), 'unknown')
+        self.assertNotEqual(self.choose(), 'combo_tlsrec_tcpsplit')
 
     def test_progress_on_one_ip_does_not_force_strategy_on_another(self):
         self.record('tcp_split_sni_mid', 'progress')

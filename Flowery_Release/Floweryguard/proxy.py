@@ -2323,6 +2323,9 @@ class DPIBypassProxy:
             except OSError:
                 target_ip = None
         suspect_recorded = False
+        started = time.monotonic()
+        logger.debug('[TLS-маршрут] %s:%s через %s, техника %s, сеть %s: начало передачи',
+                     host, port, target_ip, strategy, network)
 
         def account(direction, count):
             if direction == 'rx':
@@ -2348,9 +2351,9 @@ class DPIBypassProxy:
             self.route_health.record(network, host, port, target_ip, 'suspect')
             self.route_health.record_strategy(network, host, port, target_ip, strategy, 'suspect')
             logger.info(
-                '[Маршрут] %s:%s через %s: нет прогресса после %s байт (%s); '
+                '[Маршрут] %s:%s через %s: нет прогресса после %s байт (%s, техника %s); '
                 'приоритет адреса временно снижен для новых соединений',
-                host, port, target_ip, progress.server_bytes, reason)
+                host, port, target_ip, progress.server_bytes, reason, strategy)
 
         try:
             progress, reason = relay_tls(
@@ -2358,6 +2361,10 @@ class DPIBypassProxy:
                 self.buffer_size, account, record_progress, long_lived=long_lived,
                 on_suspect=record_suspect)
             outcome = progress.finish(reason, time.monotonic())
+            logger.debug(
+                '[TLS-маршрут] %s:%s через %s, техника %s: tx=%s rx=%s, %.2f с, %s, оценка %s',
+                host, port, target_ip, strategy, progress.client_bytes, progress.server_bytes,
+                time.monotonic() - started, reason, outcome)
             if outcome == 'suspect':
                 record_suspect(progress, reason)
         finally:
