@@ -369,11 +369,15 @@ class ProfileManager:
                             prof_name = prof_obj.get("name", new_prof_id) if prof_obj else new_prof_id
                             logger.info(f"Смена сети: {curr_fp} -> Активирован профиль '{prof_name}'")
                             print(f"\n\033[96m[*] Смена сети: {curr_fp} -> Активирован профиль '{prof_name}'\033[0m")
-                            if on_switch_callback:
-                                try:
-                                    on_switch_callback(new_prof_id, prof_name, curr_fp)
-                                except Exception as e:
-                                    logger.debug(f"Ошибка вызова on_switch_callback: {e}")
+                        else:
+                            prof_obj = self.get_profile(new_prof_id)
+                            prof_name = prof_obj.get("name", new_prof_id) if prof_obj else new_prof_id
+                            logger.info("Сеть изменилась, профиль сохранён: %s", new_prof_id)
+                        if on_switch_callback:
+                            try:
+                                on_switch_callback(new_prof_id, prof_name, curr_fp)
+                            except Exception as e:
+                                logger.debug(f"Ошибка вызова on_switch_callback: {e}")
                 except Exception as e:
                     logger.debug(f"Исключение в цикле NetworkProfileMonitor: {e}")
 

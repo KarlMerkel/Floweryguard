@@ -7,6 +7,7 @@ import os
 import signal
 import time
 import argparse
+import json
 import atexit
 import shutil
 import ctypes
@@ -337,7 +338,7 @@ from flowguard.detector import NetworkDetector
 from flowguard.voice_helper import VoiceHelper
 from flowguard.profiles import ProfileManager
 from flowguard.tray import FloweryTrayIcon
-from flowguard.logger import logger, open_current_log_file, get_current_log_path
+from flowguard.logger import logger, open_current_log_file, get_current_log_path, show_live_log
 from flowguard.calibration import StrategyCalibrator
 from flowguard.doh_resolver import (
     DoHResolver,
@@ -1215,6 +1216,8 @@ class FloweryApp:
             "   [93m15.[0m [97mТест доступности сайтов  [0m",
             "   [93m16.[0m [97mОткрыть лог-файл сессии  [0m",
             "   [93m17.[0m [97mОбновить базу доменов    [0m [90m(онлайн sync)[0m",
+            "   [93m20.[0m [97mПроверить сертификат сайта[0m",
+            "   [93m19.[0m [97mЖивой журнал соединений[0m",
             "   [93m18.[0m [97mОтправить лог разработчику[0m [92m[Поддержка][0m",
             "",
             sep,
@@ -1397,8 +1400,27 @@ class FloweryApp:
                 self.update_whitelist_interactive()
             elif choice == "18":
                 self.send_logs_interactive()
+            elif choice == "19":
+                show_live_log()
+            elif choice == "20":
+                from flowguard.certificate_diagnostics import check_certificate
+                try:
+                    host = input('Имя сайта для проверки сертификата (без URL): ').strip()
+                    if host:
+                        routes = [None]
+                        if self.proxy_server.is_running:
+                            routes.append((self.proxy_server.host, self.proxy_server.port))
+                        for route in routes:
+                            result = check_certificate(host, proxy=route)
+                            print(json.dumps(result, ensure_ascii=False, indent=2))
+                            logger.info('[Сертификат] %s', json.dumps(result, ensure_ascii=False))
+                        input('Enter — вернуться в меню...')
+                except (ValueError, UnicodeError) as error:
+                    print(str(error))
+                except (KeyboardInterrupt, EOFError):
+                    logger.debug('[Сертификат] проверка прервана пользователем')
             else:
-                print("\033[91mНеверный выбор. Введите число от 0 до 18.\033[0m")
+                print("\033[91mНеверный выбор. Введите число от 0 до 20.\033[0m")
                 time.sleep(1.0)
 
     def print_banner(self) -> None:

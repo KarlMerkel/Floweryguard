@@ -312,16 +312,13 @@ class TestFloweryV140Fixes(unittest.TestCase):
         mark_ip_working(dead_ip)
 
     def test_fast_fallback_budget_bounds(self):
-        """Fast-Fallback: проверка константы бюджета 8.0с, адаптивных тайм-аутов и последовательности одной переменной."""
+        """TLS-ожидание оставляет запас серверу, но не превышает остаток бюджета."""
         from flowguard import proxy
-        source = inspect.getsource(proxy.DPIBypassProxy._handshake_with_fast_fallback)
-        self.assertIn("MAX_FALLBACK_BUDGET = 8.0", source)
-        self.assertIn("remaining_budget()", source)
-        self.assertIn("strat3 = self.strategy_engine.get_fallback_strategy", source)
-        self.assertIn("adaptive_floor1 = max(0.18", source)
-        self.assertIn("adaptive_floor2 = max(0.25", source)
-        self.assertIn("adaptive_floor3 = max(0.25", source)
-        self.assertIn("skip_attempt2_fast_path", source)
+        timeout = proxy.DPIBypassProxy._tls_probe_timeout
+        self.assertGreaterEqual(timeout(.01, 8), 1.2)
+        self.assertGreater(timeout(.5, 8), timeout(.01, 8))
+        self.assertEqual(timeout(.5, .2), .2)
+        self.assertEqual(timeout(.01, 0), 0)
 
     def test_safe_execute_strategy_handles_connection_reset(self):
         """Проверка _safe_execute_strategy: перехватывает ConnectionResetError без падения потока."""

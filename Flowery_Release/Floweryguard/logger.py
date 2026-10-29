@@ -9,9 +9,96 @@ import re
 import sys
 import logging
 import datetime
+from collections import deque
+from functools import wraps
+import threading
+import time
+import uuid
 from typing import Optional
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_CONNECTION = threading.local()
+
+
+def current_connection_id():
+    return getattr(_CONNECTION, 'identifier', '-')
+
+
+class ConnectionFilter(logging.Filter):
+    def filter(self, record):
+        record.connection_id = current_connection_id()
+        return True
+
+
+def trace_connection(function):
+    """Связывает события соединения, не записывая адрес клиента и тело запроса."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        previous = current_connection_id()
+        _CONNECTION.identifier = uuid.uuid4().hex[:12]
+        started = time.monotonic()
+        trace = get_logger('Connection')
+        trace.debug('Соединение принято')
+        try:
+            return function(*args, **kwargs)
+        finally:
+            trace.debug('Соединение завершено за %.3f с', time.monotonic() - started)
+            _CONNECTION.identifier = previous
+    return wrapped
+
+
+class LiveLogHandler(logging.Handler):
+    """Ограниченный журнал в памяти; сетевые потоки не ждут вывода консоли."""
+    def __init__(self, capacity=200):
+        super().__init__(logging.DEBUG)
+        self._lines = deque(maxlen=capacity)
+        self._sequence = 0
+
+    def emit(self, record):
+        try:
+            line = strip_ansi(self.format(record))
+            line = ''.join(c for c in line if c >= ' ' or c == '\t')[:4096]
+            self._sequence += 1
+            self._lines.append((self._sequence, line))
+        except Exception:
+            self.handleError(record)
+
+    def snapshot(self):
+        with self.lock:
+            return [line for _, line in self._lines]
+
+    def since(self, sequence):
+        with self.lock:
+            return self._sequence, [line for number, line in self._lines if number > sequence]
+
+
+_LIVE_LOG = LiveLogHandler()
+_LIVE_LOG.addFilter(ConnectionFilter())
+_LIVE_LOG.setFormatter(logging.Formatter(
+    '%(asctime)s [%(levelname)s] [%(connection_id)s] %(name)s: %(message)s', '%H:%M:%S'))
+
+
+def show_live_log(output=None, stop_requested=None):
+    """Показывает последние события и новые записи; Enter/Ctrl+C возвращает в меню."""
+    output = output or sys.stdout
+    if stop_requested is None:
+        if os.name == 'nt':
+            import msvcrt
+            stop_requested = lambda: msvcrt.kbhit() and msvcrt.getwch() in ('\r', '\n', '\x1b')
+        else:
+            import select
+            stop_requested = lambda: bool(select.select([sys.stdin], [], [], 0)[0])
+    print('Живой журнал. Enter или Ctrl+C — вернуться; службы продолжат работу.', file=output)
+    sequence = 0
+    try:
+        while not stop_requested():
+            sequence, lines = _LIVE_LOG.since(sequence)
+            for line in lines:
+                print(line, file=output)
+            output.flush()
+            time.sleep(.2)
+    except KeyboardInterrupt:
+        return
 
 
 def strip_ansi(text: str) -> str:
@@ -82,10 +169,7 @@ def get_log_dir() -> str:
 
 def _get_app_version() -> str:
     try:
-        try:
-            from Floweryguard import __version__
-        except ImportError:
-            from flowguard import __version__
+        from flowguard import __version__
         return __version__
     except Exception:
         try:
@@ -161,6 +245,8 @@ def setup_logger(force_reconfigure: bool = False) -> logging.Logger:
     logger = logging.getLogger("Flowery")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
+    if _LIVE_LOG not in logger.handlers:
+        logger.addHandler(_LIVE_LOG)
 
     # Дедупликация хэндлеров: исключаем повторное добавление FileHandler (B11)
     file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
@@ -195,8 +281,9 @@ def setup_logger(force_reconfigure: bool = False) -> logging.Logger:
 
     try:
         handler = logging.FileHandler(log_file, encoding="utf-8", mode="a")
+        handler.addFilter(ConnectionFilter())
         formatter = AnsiStrippingFormatter(
-            "%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s",
+            "%(asctime)s.%(msecs)03d [%(levelname)s] [%(threadName)s] [conn=%(connection_id)s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
         handler.setFormatter(formatter)

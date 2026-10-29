@@ -30,14 +30,14 @@ try:
     from flowguard.tls_parser import is_tls_client_hello, parse_sni, create_tls_record_fragments
     from flowguard.sni_spoofer import SNISpoofer
     from flowguard.strategy import get_strategy_engine, execute_strategy, StrategyExecutor, MAJOR_BLOCKED_PATTERNS
-    from flowguard.logger import get_logger
+    from flowguard.logger import get_logger, trace_connection
     from flowguard.calibration import WarmUpHarvester
 except ImportError:
     from Floweryguard.config import Config, load_whitelist_domains, is_host_in_whitelist
     from Floweryguard.tls_parser import is_tls_client_hello, parse_sni, create_tls_record_fragments
     from Floweryguard.sni_spoofer import SNISpoofer
     from Floweryguard.strategy import get_strategy_engine, execute_strategy, StrategyExecutor, MAJOR_BLOCKED_PATTERNS
-    from Floweryguard.logger import get_logger
+    from Floweryguard.logger import get_logger, trace_connection
     try:
         from Floweryguard.calibration import WarmUpHarvester
     except ImportError:
@@ -664,11 +664,8 @@ class ShadowProber:
 
     def _probe_host(self, host: str, ip: Optional[str]) -> None:
         """Тихо проверяет альтернативные стратегии на отдельном сокете."""
-        is_yt = is_google_or_youtube_host(host.lower())
-        is_dc = is_discord_host(host)
-
-        # Выбираем альтернативную стратегию для проверки
-        test_strat = "combo_tlsrec_tcpsplit" if is_yt else ("combo_tlsrec_tcpsplit" if not is_dc else "direct")
+        test_strat = self.strategy_engine.allowed_strategy(
+            self.strategy_engine.select_strategy(host, ip=ip))
         target_ip = ip or host
         s = None
         try:
@@ -685,7 +682,9 @@ class ShadowProber:
             s.settimeout(1.0)
             resp = s.recv(16)
             if resp and resp[0] == 0x16:  # TLS Record (ServerHello / Handshake)
-                self.strategy_engine.record_success(host, test_strat, ip=target_ip)
+                logger.debug('[TLS-проба] %s через %s, техника %s: ответ %s байт; '
+                             'полнота загрузки неизвестна, оценка не изменена',
+                             host, target_ip, test_strat, len(resp))
             # При отсутствии ответа на синтетический ClientHello НЕ налагаем штраф,
             # так как современные CDN могут отсекать тестовые запросы без полных расширений TLS 1.3
         except Exception:
@@ -760,7 +759,9 @@ class DPIBypassProxy:
             tls_record_frag=config.tls_record_frag,
             oob_data=config.oob_data
         )
-        self.shadow_prober = ShadowProber(self.strategy_engine) if config.auto_strategy else None
+        # Синтетический ClientHello не проверяет загрузку. Не запускаем лишний
+        # фоновый сетевой поток: диагностические пробы выполняет калибровка.
+        self.shadow_prober = None
         self.warmup_harvester = WarmUpHarvester(
             self.strategy_engine,
             whitelist_domains=self.whitelist_domains
@@ -941,6 +942,7 @@ class DPIBypassProxy:
         self.start()
         return True
 
+    @trace_connection
     def _handle_client(self, client_sock: socket.socket, client_addr: Tuple[str, int]) -> None:
         """Обрабатывает одно клиентское подключение."""
         target_sock: Optional[socket.socket] = None
@@ -992,7 +994,11 @@ class DPIBypassProxy:
                     target_port = 443
 
                 route_network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
+                logger.debug('[CONNECT] %s:%s: разрешение адреса и подключение', target_host, target_port)
+                connect_started = time.monotonic()
                 target_sock = self._connect_target(target_host, target_port)
+                logger.debug('[CONNECT] %s:%s: tcp=%s за %.3f с', target_host, target_port,
+                             'connected' if target_sock else 'failed', time.monotonic() - connect_started)
                 if not target_sock:
                     try:
                         client_sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
@@ -1042,8 +1048,8 @@ class DPIBypassProxy:
                 self._handle_http_request(client_sock, raw_req, target)
                 return
 
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug('[Соединение] ошибка %s errno=%s', type(exc).__name__, getattr(exc, 'errno', None))
         finally:
             with self._lock:
                 self.active_connections = max(0, self.active_connections - 1)
@@ -2010,6 +2016,10 @@ class DPIBypassProxy:
         self._safe_execute_strategy(strategy, target_sock, data, host=sni_name)
         return strategy, sni_name
 
+    @staticmethod
+    def _tls_probe_timeout(rtt, budget):
+        return max(0.0, min(budget, max(1.2, min(3.0, rtt * 4.0 + 0.5))))
+
     def _handshake_with_fast_fallback(
         self,
         client_sock: socket.socket,
@@ -2033,10 +2043,11 @@ class DPIBypassProxy:
 
         current_sock = target_sock
         MAX_FALLBACK_BUDGET = 8.0
-        start_time = time.time()
+        start_time = time.monotonic()
+        network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
 
         def remaining_budget() -> float:
-            return max(0.05, MAX_FALLBACK_BUDGET - (time.time() - start_time))
+            return max(0.0, MAX_FALLBACK_BUDGET - (time.monotonic() - start_time))
 
         meta = _get_socket_meta(current_sock)
         current_ip = meta.get("target_ip")
@@ -2047,51 +2058,44 @@ class DPIBypassProxy:
             current_sock, first_packet, target_host, ip=current_ip, target_port=target_port
         )
         fixed_strategy = self._fixed_strategy(effective_host)
-        t_send1 = time.time()
 
-        is_dc = is_discord_host(effective_host)
-        if is_discord_media_host(effective_host) or is_dc:
-            min_floor = 0.65
-            adaptive_floor1 = max(0.25, min(0.95, base_rtt * 3.0 + min_floor))
-        else:
-            adaptive_floor1 = max(0.18, min(0.65, base_rtt * 3.0 + 0.35))
-        timeout1 = min(remaining_budget() * 0.55, max(adaptive_floor1, min(1.20, base_rtt * 3.0 + 0.20)))
-        status1, resp1, delta_ms1 = self._probe_socket_response(current_sock, t_send1, base_rtt, strat1, probe_timeout=timeout1)
+        def failed(ip, strategy, reason):
+            # Таймаут/RST не устанавливает причину отказа. Учитываем его только
+            # для исходной сети, хоста, порта и адреса, без штрафа всему CDN.
+            self._record_route_failure(effective_host, target_port, ip, network)
+            self.route_health.record_strategy(network, effective_host, target_port,
+                                              ip, strategy, 'suspect')
+            logger.info('[TLS-повтор] %s:%s ip=%s техника=%s: %s; '
+                        'сохранён локальный отказ, причина не установлена',
+                        effective_host, target_port, ip, strategy, reason)
+
+        def probe(sock, ip, strategy, rtt, attempt):
+            # TCP connect не измеряет обработку ClientHello сервером. Оставляем
+            # запас для задержанного ответа и повторной передачи пакета.
+            wait = self._tls_probe_timeout(rtt, remaining_budget())
+            if wait <= 0:
+                return 'budget_exhausted', None, 0.0
+            status, response, elapsed = self._probe_socket_response(
+                sock, time.time(), rtt, strategy, probe_timeout=wait)
+            logger.debug('[TLS-попытка] %s:%s ip=%s техника=%s попытка=%s '
+                         'tcp_rtt=%.1fмс ожидание=%.0fмс прошло=%.0fмс результат=%s rx=%s',
+                         effective_host, target_port, ip, strategy, attempt, rtt * 1000,
+                         wait * 1000, elapsed, status, len(response or b''))
+            if status != 'success':
+                failed(ip, strategy, status)
+            return status, response, elapsed
+
+        status1, resp1, delta_ms1 = probe(current_sock, current_ip, strat1, base_rtt, 1)
         is_tspu = False
 
         if status1 == "success":
-            if self.shadow_prober:
-                self.shadow_prober.maybe_enqueue(effective_host, ip=current_ip)
             return current_sock, strat1, effective_host, resp1
-        elif status1 in ("rst_fast", "rst_server"):
-            is_tspu = True
-            logger.warning(
-                f"[!] RST детекция ({status1}): {effective_host} ({current_ip or 'IP'}) "
-                f"сброс за {delta_ms1:.1f}мс (базовый RTT {base_rtt*1000:.1f}мс, strat={strat1}) -> Fast-Fallback..."
-            )
-        elif status1 == "silent_drop":
-            is_yt = is_google_or_youtube_host(effective_host.lower())
-            is_tspu = True
-            if strat1 in ("direct", "boringssl_split", "tcp_split_sni_start") or is_yt:
-                logger.warning(
-                    f"[!] ТСПУ Silent Drop: {effective_host} ({current_ip or 'IP'}) "
-                    f"тишина > {delta_ms1:.0f}мс (strat={strat1}) -> Мгновенный обход..."
-                )
-            else:
-                logger.info(
-                    f"[!] Drop на стратегию ({strat1}): {effective_host} "
-                    f"тишина > {delta_ms1:.0f}мс -> Fallback на альтернативу..."
-                )
-        else:
-            is_tspu = False
-            logger.info(
-                f"[*] Ошибка сокета на первой попытке ({status1}): {effective_host} ({current_ip or 'IP'}) "
-                f"-> Fast-Fallback..."
-            )
 
         # 2. Неуспешная первая попытка: Запускаем Transparent Fast-Fallback
         _safe_close_socket(current_sock)
         _WORKING_IP_CACHE.pop(effective_host, None)
+        if remaining_budget() <= 0:
+            return None, strat1, effective_host, None
 
         is_yt = is_google_or_youtube_host(effective_host.lower())
         is_dc = is_discord_host(effective_host)
@@ -2105,8 +2109,6 @@ class DPIBypassProxy:
 
         if skip_attempt2_fast_path and current_ip and is_dc:
             _RECENT_DISCORD_IPS.set(current_ip, time.time())
-
-        self.strategy_engine.record_failure(effective_host, strat1, ip=current_ip, is_tspu=is_tspu)
 
         strat2 = self.strategy_engine.get_fallback_strategy(
             effective_host,
@@ -2125,30 +2127,23 @@ class DPIBypassProxy:
         # Попытка 2: тот же IP, альтернативная стратегия (если не пропущена через Fast-Path)
         strat2_executed = False
         if not skip_attempt2_fast_path and current_ip:
-            if is_dc or is_yt or is_whitelisted:
-                adaptive_floor2 = max(0.85, min(1.50, base_rtt * 3.0 + 0.60))
-                timeout2 = max(1.20, min(remaining_budget() * 0.45, max(adaptive_floor2, min(2.50, base_rtt * 2.5 + 0.60))))
-            else:
-                adaptive_floor2 = max(0.25, min(0.60, base_rtt * 3.0 + 0.10))
-                timeout2 = min(remaining_budget() * 0.45, max(adaptive_floor2, min(1.20, base_rtt * 2.5 + 0.25)))
+            timeout2 = min(2.5, remaining_budget())
             sock2 = self._connect_target(target_host, target_port, target_ip=current_ip, timeout=timeout2)
             if sock2:
                 meta2 = _get_socket_meta(sock2)
                 base_rtt2 = meta2.get("connect_rtt", base_rtt)
-                t_send2 = time.time()
                 if self._safe_execute_strategy(strat2, sock2, first_packet, host=effective_host):
                     strat2_executed = True
-                    status2, resp2, delta_ms2 = self._probe_socket_response(sock2, t_send2, base_rtt2, strat2, probe_timeout=timeout2)
+                    status2, resp2, delta_ms2 = probe(sock2, meta2.get('target_ip', current_ip), strat2, base_rtt2, 2)
                     if status2 == "success":
                         return sock2, strat2, effective_host, resp2
+                else:
+                    failed(meta2.get('target_ip', current_ip), strat2, 'send_error')
                 _safe_close_socket(sock2)
-                self._record_route_failure(effective_host, target_port, meta2.get("target_ip", current_ip))
 
         # Попытка 3: ДРУГОЙ живой IP
-        if is_dc or is_yt or is_whitelisted:
-            adaptive_floor3 = max(0.85, min(1.50, base_rtt * 3.0 + 0.60))
-        else:
-            adaptive_floor3 = max(0.25, min(0.60, base_rtt * 3.0 + 0.10))
+        if remaining_budget() <= 0:
+            return None, strat1, effective_host, None
         connect_to3 = min(2.5, remaining_budget() * 0.7)
         exclude_set = {current_ip} if current_ip else set()
         new_sock = self._connect_target(target_host, target_port, exclude_ip=exclude_set, timeout=connect_to3)
@@ -2158,7 +2153,7 @@ class DPIBypassProxy:
         if not new_sock:
             target_err_ip = current_ip
             if target_err_ip:
-                self._record_route_failure(effective_host, target_port, target_err_ip)
+                self._record_route_failure(effective_host, target_port, target_err_ip, network)
             return None, strat1, effective_host, None
 
         meta_new = _get_socket_meta(new_sock)
@@ -2196,17 +2191,12 @@ class DPIBypassProxy:
 
         strat3 = self.strategy_engine.allowed_strategy(fixed_strategy if fixed_strategy is not None else strat3)
         strat3 = self._strategy_after_stall(effective_host, target_port, new_ip, strat3, failed_so_far)
-        t_send3 = time.time()
         if not self._safe_execute_strategy(strat3, new_sock, first_packet, host=effective_host):
+            failed(new_ip, strat3, 'send_error')
             _safe_close_socket(new_sock)
             return None, strat3, effective_host, None
 
-        if is_dc or is_yt or is_whitelisted:
-            adaptive_floor3 = max(0.85, min(1.50, base_rtt_new * 3.0 + 0.60))
-            timeout3 = max(1.20, min(remaining_budget() * 0.50, max(adaptive_floor3, min(2.50, base_rtt_new * 2.5 + 0.60))))
-        else:
-            timeout3 = min(remaining_budget() * 0.50, max(adaptive_floor3, min(1.20, base_rtt_new * 2.5 + 0.25)))
-        status3, resp3, _ = self._probe_socket_response(new_sock, t_send3, base_rtt_new, strat3, probe_timeout=timeout3)
+        status3, resp3, _ = probe(new_sock, new_ip, strat3, base_rtt_new, 3)
         if status3 == "success":
             return new_sock, strat3, effective_host, resp3
         _safe_close_socket(new_sock)
