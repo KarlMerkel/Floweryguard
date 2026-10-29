@@ -1209,8 +1209,9 @@ class FloweryApp:
 
         if cols >= 105:
             # Двухколоночный режим: слева Flowey арт, справа меню
-            for i in range(len(FLOWEY_ART)):
-                line = FLOWEY_ART[i]
+            art_width = max(map(len, FLOWEY_ART), default=0)
+            for i in range(max(len(FLOWEY_ART), len(right_lines))):
+                line = FLOWEY_ART[i] if i < len(FLOWEY_ART) else ' ' * art_width
                 if i < 17:
                     c_flowey = "[93m" + line + "[0m"
                 elif i < 34:
@@ -1250,7 +1251,7 @@ class FloweryApp:
             self.render_menu()
             choice = ""
             try:
-                choice = input("\033[1;93mВыберите пункт (0-18):\033[0m ").strip()
+                choice = input("\033[1;93mВыберите пункт (0-20):\033[0m ").strip()
             except EOFError:
                 try:
                     sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="replace")
