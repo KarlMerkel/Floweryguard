@@ -26,7 +26,8 @@ class TestTransferProgress(unittest.TestCase):
     def test_plateau_then_client_timeout_is_suspect_not_success(self):
         progress = TransferProgress()
         progress.sent(700)
-        progress.received(14000, 1)
+        partial = b'\x17\x03\x03\x40\x00' + b'x' * 13995
+        progress.received(len(partial), 1, data=partial)
         self.assertEqual(progress.finish('client_eof', 16), 'suspect')
         self.assertEqual(progress.finish('client_reset', 16), 'suspect')
         self.assertFalse(progress.proven)

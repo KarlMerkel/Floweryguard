@@ -22,12 +22,23 @@ class TestTlsRouteProgress(unittest.TestCase):
         self.proxy.route_health = RouteHealth()
 
     def run_flow(self, size, end_time=16, host='surfshark.com', client_error=False, route_network=None,
-                 strategy='combo_tlsrec_tcpsplit'):
+                 strategy='combo_tlsrec_tcpsplit', complete=False, initial=b''):
         client, upstream = MagicMock(spec=socket.socket), MagicMock(spec=socket.socket)
         ip = '104.18.120.10'
         _set_socket_meta(upstream, ip, 0.02)
         request = b'\x17' + b'C' * 300
-        response = b'\x17' + b'S' * (size - 1)
+        if size < 65536 and not complete and size >= 6144:
+            response = b'\x17\x03\x03\x40\x00' + b'S' * (size - 5)
+        else:
+            chunks = []
+            remaining = size
+            while remaining:
+                length = min(16000, remaining - 5)
+                chunks.append(b'\x17\x03\x03' + length.to_bytes(2, 'big') + b'S' * length)
+                remaining -= length + 5
+            response = b''.join(chunks)
+        if initial:
+            response = response[len(initial):]
         client.recv.side_effect = [request, ConnectionResetError() if client_error else b'']
         upstream.recv.return_value = response
         events = iter([(0, client), (1, upstream), (end_time, client), (end_time + 15, None)])
@@ -49,7 +60,8 @@ class TestTlsRouteProgress(unittest.TestCase):
              patch('flowguard.proxy.select.select', side_effect=ready), \
              patch('flowguard.proxy.mark_ip_dead') as dead:
             self.proxy._pipe_sockets(client, upstream, host=host, strategy=strategy,
-                                     got_initial_response=True, tls_tunnel=True, route_network=route_network)
+                                     got_initial_response=True, tls_tunnel=True, route_network=route_network,
+                                     initial_response=initial)
         dead.assert_not_called()
         self.assertEqual(b''.join(delivered[client]), response)
         self.assertEqual(b''.join(delivered[upstream]), request)
@@ -70,6 +82,14 @@ class TestTlsRouteProgress(unittest.TestCase):
         self.assertEqual(self.run_flow(100000), 'progress')
         self.proxy.strategy_engine.record_success.assert_called_once()
         self.assertEqual(_WORKING_IP_CACHE.get('surfshark.com'), '104.18.120.10')
+
+    def test_complete_small_response_is_not_penalized(self):
+        self.assertEqual(self.run_flow(14000, complete=True), 'unknown')
+        self.proxy.strategy_engine.record_success.assert_not_called()
+        self.proxy.strategy_engine.record_failure.assert_not_called()
+
+    def test_partial_header_from_handshake_keeps_record_tracking(self):
+        self.assertEqual(self.run_flow(14000, initial=b'\x17\x03'), 'suspect')
 
     def test_direct_transfer_trains_selector_too(self):
         self.assertEqual(self.run_flow(100000, strategy='direct'), 'progress')

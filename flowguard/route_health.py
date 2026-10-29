@@ -14,29 +14,58 @@ class TransferProgress:
         self.last_received = 0.0
         self.client_closed_at = None
         self.first_sent = None
+        self._record_header = bytearray()
+        self._record_remaining = 0
+        self._records_valid = True
+
+    def observe_records(self, data):
+        """Считает границы TLS, сохраняя не более пяти байт заголовка."""
+        offset = 0
+        while self._records_valid and offset < len(data):
+            if self._record_remaining:
+                count = min(self._record_remaining, len(data) - offset)
+                self._record_remaining -= count
+                offset += count
+                continue
+            count = min(5 - len(self._record_header), len(data) - offset)
+            self._record_header.extend(data[offset:offset + count])
+            offset += count
+            if len(self._record_header) < 5:
+                break
+            header = self._record_header
+            length = int.from_bytes(header[3:5], 'big')
+            if header[0] not in (20, 21, 22, 23, 24) or header[1] != 3 or header[2] > 4 or length > 18432:
+                self._records_valid = False
+            else:
+                self._record_remaining = length
+            self._record_header.clear()
+
+    @property
+    def incomplete_record(self):
+        return self._records_valid and bool(self._record_header or self._record_remaining)
 
     def sent(self, count, now=0.0):
         if self.first_sent is None and count:
             self.first_sent = now
         self.client_bytes += count
 
-    def received(self, count, now):
+    def received(self, count, now, data=None):
         self.server_bytes += count
         self.last_received = now
+        if data is not None:
+            self.observe_records(data)
 
     @property
     def proven(self):
-        return self.server_bytes >= 65536
+        return self.server_bytes >= 65536 and self._records_valid and not self.incomplete_record
 
     @property
     def stall_window(self):
-        """Запрос отправлен, а ответ отсутствует или замер на типичном для обрыва объёме."""
-        return (not self.proven and 0 < self.client_bytes < 32768
-                and (self.server_bytes == 0 or 6144 <= self.server_bytes < 32768))
+        """Ожидание ответа или незавершённой TLS-записи, а не диапазон объёма."""
+        return (self.incomplete_record or
+                (0 < self.client_bytes < 32768 and self.server_bytes == 0))
 
     def finish(self, reason, now):
-        if self.proven:
-            return 'progress'
         if reason == 'client_eof' and self.client_closed_at is not None:
             now = self.client_closed_at
         waiting_since = self.last_received if self.server_bytes else self.first_sent
@@ -45,6 +74,10 @@ class TransferProgress:
         if (reason in ('client_eof', 'client_reset', 'idle_timeout') and self.stall_window
                 and waiting_since is not None and now - waiting_since >= 3.0):
             return 'suspect'
+        if reason in ('server_eof', 'server_error') and self.incomplete_record:
+            return 'suspect'
+        if self.proven:
+            return 'progress'
         return 'unknown'
 
 

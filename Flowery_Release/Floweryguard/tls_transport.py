@@ -8,9 +8,10 @@ from .route_health import TransferProgress
 
 
 def relay_tls(client, upstream, running, timeout, buffer_size, on_bytes, on_progress,
-              long_lived=False, on_suspect=None):
+              long_lived=False, on_suspect=None, initial_response=b''):
     """Не расшифровывает и не повторяет запросы; учитывает доставленные байты."""
     progress = TransferProgress()
+    progress.observe_records(initial_response)
     sockets = (client, upstream)
     buffers = {client: bytearray(), upstream: bytearray()}
     readers = set(sockets)
@@ -55,10 +56,9 @@ def relay_tls(client, upstream, running, timeout, buffer_size, on_bytes, on_prog
                 return progress, 'client_write_error' if destination is client else 'server_error'
             if count <= 0:
                 return progress, 'client_write_error' if destination is client else 'server_error'
-            del buffers[destination][:count]
             last_activity = time.monotonic()
             if destination is client:
-                progress.received(count, last_activity)
+                progress.received(count, last_activity, data=memoryview(buffers[destination])[:count])
                 on_bytes('rx', count)
                 if progress.proven and not announced:
                     announced = True
@@ -66,6 +66,7 @@ def relay_tls(client, upstream, running, timeout, buffer_size, on_bytes, on_prog
             else:
                 progress.sent(count, last_activity)
                 on_bytes('tx', count)
+            del buffers[destination][:count]
         for source in readable:
             destination = upstream if source is client else client
             try:

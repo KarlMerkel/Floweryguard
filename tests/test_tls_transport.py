@@ -43,7 +43,7 @@ class TestTlsTransport(unittest.TestCase):
     def test_stalled_half_close_updates_route_before_drain_finishes(self):
         client, upstream = Mock(), Mock()
         client.recv.side_effect = [b'request', b'']
-        upstream.recv.return_value = b'x' * 14000
+        upstream.recv.return_value = b'\x17\x03\x03\x40\x00' + b'x' * 13995
         now = [0]
         events = iter([(0, client), (1, upstream), (9, client), (24, None)])
         suspect = Mock()
@@ -74,7 +74,8 @@ class TestTlsTransport(unittest.TestCase):
         result, errors, counters = [], [], []
         reward = Mock()
         request = b'\x17' + bytes(range(256)) * 400
-        response = b'\x17' + bytes(range(255, -1, -1)) * 800
+        payload = bytes(range(255, -1, -1)) * 60
+        response = (b'\x17\x03\x03' + len(payload).to_bytes(2, 'big') + payload) * 14
 
         def relay():
             try:
@@ -118,7 +119,8 @@ class TestTlsTransport(unittest.TestCase):
         """Момент закрытия простаивающего туннеля после запроса и ответа заданного размера."""
         client, upstream = Mock(), Mock()
         client.recv.return_value = b'request'
-        upstream.recv.return_value = b'x' * response_size
+        record_size = 16384 if response_size == 14000 else response_size - 5
+        upstream.recv.return_value = b'\x17\x03\x03' + record_size.to_bytes(2, 'big') + b'x' * (response_size - 5)
         client.send.side_effect = lambda data: len(data)
         upstream.send.side_effect = lambda data: len(data)
         now = [0.0]

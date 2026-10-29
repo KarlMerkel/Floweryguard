@@ -1040,7 +1040,7 @@ class DPIBypassProxy:
                     strategy=strat_used,
                     got_initial_response=bool(init_resp),
                     tls_tunnel=is_tls_client_hello(first_packet), target_port=target_port,
-                    route_network=route_network
+                    route_network=route_network, initial_response=init_resp or b''
                 )
 
             else:
@@ -2304,7 +2304,7 @@ class DPIBypassProxy:
 
         return host.strip().rstrip("."), port, path
 
-    def _pipe_tls(self, client_sock, target_sock, host, strategy, port, long_lived, network):
+    def _pipe_tls(self, client_sock, target_sock, host, strategy, port, long_lived, network, initial_response=b''):
         """Учитывает прогресс TLS отдельно от HTTP-статуса, который прокси не видит."""
         target_ip = _get_socket_meta(target_sock).get('target_ip')
         if not target_ip:
@@ -2330,8 +2330,6 @@ class DPIBypassProxy:
             if network != getattr(self.strategy_engine, '_current_network', 'default'):
                 return
             mark_ip_working(target_ip, host)
-            if host and strategy and strategy != 'http':
-                self.strategy_engine.record_success(host, strategy, ip=target_ip)
 
         def record_suspect(progress, reason):
             nonlocal suspect_recorded
@@ -2341,7 +2339,7 @@ class DPIBypassProxy:
             self.route_health.record(network, host, port, target_ip, 'suspect')
             self.route_health.record_strategy(network, host, port, target_ip, strategy, 'suspect')
             logger.info(
-                '[Маршрут] %s:%s через %s: нет прогресса после %s байт (%s, техника %s); '
+                '[Маршрут] %s:%s через %s: ожидание ответа/частичной TLS-записи после %s байт (%s, техника %s); '
                 'приоритет адреса временно снижен для новых соединений',
                 host, port, target_ip, progress.server_bytes, reason, strategy)
 
@@ -2349,14 +2347,19 @@ class DPIBypassProxy:
             progress, reason = relay_tls(
                 client_sock, target_sock, lambda: self.is_running, float(self.timeout),
                 self.buffer_size, account, record_progress, long_lived=long_lived,
-                on_suspect=record_suspect)
+                on_suspect=record_suspect, initial_response=initial_response)
             outcome = progress.finish(reason, time.monotonic())
             logger.debug(
-                '[TLS-маршрут] %s:%s через %s, техника %s: tx=%s rx=%s, %.2f с, %s, оценка %s',
+                '[TLS-маршрут] %s:%s через %s, техника %s: tx=%s rx=%s, %.2f с, %s, оценка %s; '
+                'начальный_ответ=%s частичная_TLS_запись=%s; полнота_HTTP=неизвестна',
                 host, port, target_ip, strategy, progress.client_bytes, progress.server_bytes,
-                time.monotonic() - started, reason, outcome)
+                time.monotonic() - started, reason, outcome, len(initial_response), progress.incomplete_record)
             if outcome == 'suspect':
                 record_suspect(progress, reason)
+            elif (outcome == 'progress' and not suspect_recorded and
+                  reason in ('server_eof', 'client_eof') and host and strategy and strategy != 'http' and
+                  network == getattr(self.strategy_engine, '_current_network', 'default')):
+                self.strategy_engine.record_success(host, strategy, ip=target_ip)
         finally:
             _safe_close_socket(client_sock)
             _safe_close_socket(target_sock)
@@ -2370,7 +2373,8 @@ class DPIBypassProxy:
         got_initial_response: bool = False,
         tls_tunnel: bool = False,
         target_port: int = 443,
-        route_network: Optional[str] = None
+        route_network: Optional[str] = None,
+        initial_response: bytes = b''
     ) -> None:
         """Двунаправленная надёжная пересылка трафика между клиентом и целевым сервером."""
         h_clean = (host or "").split(":")[0].lower()
@@ -2398,7 +2402,8 @@ class DPIBypassProxy:
 
         if tls_tunnel:
             network = route_network if route_network is not None else getattr(self.strategy_engine, '_current_network', 'default')
-            self._pipe_tls(client_sock, target_sock, host, strategy, target_port, is_long_lived, network)
+            self._pipe_tls(client_sock, target_sock, host, strategy, target_port, is_long_lived, network,
+                           initial_response=initial_response)
             return
 
         pipe_timeout = 3600.0 if is_long_lived else 60.0
