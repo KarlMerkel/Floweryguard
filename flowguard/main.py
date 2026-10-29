@@ -4,6 +4,17 @@ DPI bypass инструмент для мобильного тетеринга �
 
 import sys
 import os
+
+# Отдельный просмотр файла не импортирует службы, не запрашивает UAC и
+# не регистрирует обработчики восстановления настроек основного процесса.
+if __name__ == '__main__' and sys.argv[1:2] == ['--log-window']:
+    import runpy
+    viewer_base = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
+    viewer_path = os.path.join(viewer_base, 'log_viewer.py')
+    sys.argv = [viewer_path] + sys.argv[2:]
+    runpy.run_path(viewer_path, run_name='__main__')
+    raise SystemExit(0)
+
 import signal
 import time
 import argparse
@@ -338,7 +349,8 @@ from flowguard.detector import NetworkDetector
 from flowguard.voice_helper import VoiceHelper
 from flowguard.profiles import ProfileManager
 from flowguard.tray import FloweryTrayIcon
-from flowguard.logger import logger, open_current_log_file, get_current_log_path, show_live_log
+from flowguard.logger import logger, open_current_log_file, get_current_log_path
+from flowguard.log_viewer import open_log_window
 from flowguard.calibration import StrategyCalibrator
 from flowguard.doh_resolver import (
     DoHResolver,
@@ -1384,7 +1396,10 @@ class FloweryApp:
             elif choice == "18":
                 self.send_logs_interactive()
             elif choice == "19":
-                show_live_log()
+                if not open_log_window(get_current_log_path()):
+                    logger.warning('[Журнал] Не удалось открыть отдельное окно')
+                    print('Не удалось открыть окно журнала. Файл доступен через пункт 16.')
+                    time.sleep(1.5)
             elif choice == "20":
                 from flowguard.certificate_diagnostics import check_certificate
                 try:

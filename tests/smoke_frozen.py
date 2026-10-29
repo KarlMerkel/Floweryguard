@@ -64,14 +64,14 @@ def main():
         env = dict(os.environ, FLOWERY_HOME=str(root / 'user-data'), PYTHONIOENCODING='utf-8')
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
-        def run(option, timeout=40):
-            result = subprocess.run([str(exe), option], cwd=root, env=env,
+        def run(*options, timeout=40):
+            result = subprocess.run([str(exe)] + list(options), cwd=root, env=env,
                                     capture_output=True, timeout=timeout, creationflags=flags)
             output = (result.stdout + result.stderr).decode('utf-8', errors='replace')
             print(output)
             if result.returncode or 'Traceback (most recent call last)' in output:
-                raise RuntimeError('EXE ' + option + ': код ' + str(result.returncode))
-            print('EXE ' + option + ': код 0')
+                raise RuntimeError('EXE ' + ' '.join(options) + ': код ' + str(result.returncode))
+            print('EXE ' + ' '.join(options) + ': код 0')
             return output
 
         help_output = run('--help')
@@ -82,6 +82,15 @@ def main():
             raise RuntimeError('EXE не прочитал внешний config.ini')
         if config.read_bytes() != original_config:
             raise RuntimeError('Проверка статуса изменила config.ini')
+
+        viewer_log = root / 'журнал проверки.log'
+        viewer_log.write_text('Проверка отдельного журнала\n', encoding='utf-8')
+        log_files = {path: path.read_bytes() for path in root.rglob('*.log')}
+        viewer_output = run('--log-window', str(viewer_log), '--once')
+        if 'Проверка отдельного журнала' not in viewer_output:
+            raise RuntimeError('Упакованный просмотрщик не прочитал журнал')
+        if {path: path.read_bytes() for path in root.rglob('*.log')} != log_files:
+            raise RuntimeError('Просмотрщик создал или изменил журнал сессии')
 
         if args.network:
             config.write_text(config.read_text(encoding='utf-8').replace('preferred', 'disabled'), encoding='utf-8')
