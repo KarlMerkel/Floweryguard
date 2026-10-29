@@ -1031,26 +1031,16 @@ class FloweryApp:
                 return
 
             if c == "1":
-                url = "https://raw.githubusercontent.com/Floweryguard/whitelist/main/whitelist.txt"
+                from flowguard.domain_list import COMMUNITY_URL
+                url = COMMUNITY_URL
             else:
                 url = input("\033[93mВведите URL списка доменов: \033[0m").strip()
                 if not url:
                     return
 
             print(f"\n\033[96m[*] Загрузка списка из {url}...\033[0m")
-            import urllib.request
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Flowery/1.2"}
-            )
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
-                content = resp.read().decode("utf-8", errors="ignore")
-
-            new_domains = set()
-            for line in content.splitlines():
-                line = line.strip().lower()
-                if line and not line.startswith("#"):
-                    new_domains.add(line)
+            from flowguard.domain_list import fetch_domains, save_domains
+            new_domains = fetch_domains(url)
 
             if not new_domains:
                 print("\033[91m[!] В загруженном файле не найдено ни одного валидного домена.\033[0m")
@@ -1066,23 +1056,15 @@ class FloweryApp:
             else:
                 final_domains = sorted(list(cur_domains.union(new_domains)))
 
-            # Резервная копия
-            if os.path.exists(target_file):
-                import shutil as sh
-                sh.copy2(target_file, target_file + ".bak")
-
-            with open(target_file, "w", encoding="utf-8") as f:
-                f.write(f"# Flowery Whitelist — обновлено {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"# Источник: {url}\n\n")
-                for d in final_domains:
-                    f.write(d + "\n")
+            save_domains(target_file, final_domains)
 
             print(f"\n\033[92m[✓] Файл {target_file} успешно сохранён ({len(final_domains)} доменов).\033[0m")
             print(f"\033[90m    (Резервная копия сохранена в {target_file}.bak)\033[0m")
 
             # Мгновенная перезагрузка в прокси
             if hasattr(self, "proxy_server") and self.proxy_server:
-                self.proxy_server.whitelist_domains = set(final_domains)
+                with self.proxy_server._whitelist_lock:
+                    self.proxy_server.whitelist_domains = set(final_domains)
                 print("\033[92m[+] Прокси Flowery мгновенно применил обновленный список!\033[0m")
 
             input("\n\033[97mНажмите Enter для возврата в главное меню...\033[0m")
@@ -1216,9 +1198,9 @@ class FloweryApp:
             "   [93m15.[0m [97mТест доступности сайтов  [0m",
             "   [93m16.[0m [97mОткрыть лог-файл сессии  [0m",
             "   [93m17.[0m [97mОбновить базу доменов    [0m [90m(онлайн sync)[0m",
-            "   [93m20.[0m [97mПроверить сертификат сайта[0m",
-            "   [93m19.[0m [97mЖивой журнал соединений[0m",
             "   [93m18.[0m [97mОтправить лог разработчику[0m [92m[Поддержка][0m",
+            "   [93m19.[0m [97mЖивой журнал соединений[0m",
+            "   [93m20.[0m [97mПроверить сертификат сайта[0m",
             "",
             sep,
             "   [93m0.[0m [97mВыход (с восстановлением системы)[0m",
