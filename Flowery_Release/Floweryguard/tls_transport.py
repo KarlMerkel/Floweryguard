@@ -16,7 +16,8 @@ def relay_tls(client, upstream, running, timeout, buffer_size, on_bytes, on_prog
     buffers = {client: bytearray(), upstream: bytearray()}
     readers = set(sockets)
     shutdown_pending = set()
-    announced = False
+    last_progress_at = None
+    last_progress_bytes = 0
     last_activity = time.monotonic()
     short_idle = max(15.0, min(60.0, float(timeout)))
     capacity = max(4096, min(buffer_size, 262144))
@@ -60,8 +61,15 @@ def relay_tls(client, upstream, running, timeout, buffer_size, on_bytes, on_prog
             if destination is client:
                 progress.received(count, last_activity, data=memoryview(buffers[destination])[:count])
                 on_bytes('rx', count)
-                if progress.proven and not announced:
-                    announced = True
+                # Продлеваем наблюдение только по новым доставленным данным.
+                # Простой и маленькие keep-alive пакеты доверие не продлевают;
+                # это обновление маршрута, а не новая награда стратегии.
+                refresh_due = (last_progress_at is None or
+                               (last_activity - last_progress_at >= 30.0 and
+                                progress.server_bytes - last_progress_bytes >= 65536))
+                if progress.proven and refresh_due:
+                    last_progress_at = last_activity
+                    last_progress_bytes = progress.server_bytes
                     on_progress()
             else:
                 progress.sent(count, last_activity)
