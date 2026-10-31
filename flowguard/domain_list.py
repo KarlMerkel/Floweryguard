@@ -16,7 +16,7 @@ def fetch_domains(url):
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError('Для списка нужна HTTPS-ссылка без логина и пароля')
-    request = urllib.request.Request(url, headers={'User-Agent': 'Flowery/1.3.0'})
+    request = urllib.request.Request(url, headers={'User-Agent': 'Flowery/1.3.1'})
     with urllib.request.urlopen(request, timeout=10.0) as response:
         data = response.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:

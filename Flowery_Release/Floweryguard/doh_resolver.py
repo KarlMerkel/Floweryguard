@@ -24,7 +24,7 @@ try:
     except ImportError:
         from flowguard.logger import _get_app_version
 except ImportError:
-    def _get_app_version(): return "1.3.0"
+    def _get_app_version(): return "1.3.1"
 
 try:
     from Floweryguard.logger import get_logger

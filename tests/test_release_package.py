@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import zipfile
 
-from prepare_release import collect_portable, write_bundle, verify_bundle, verify_build, digest
+from prepare_release import collect_portable, write_bundle, verify_bundle, verify_build, digest, VERSION
 
 
 class TestReleasePackage(unittest.TestCase):
@@ -71,7 +71,7 @@ class TestReleasePackage(unittest.TestCase):
         source = self.root / 'main.py'
         source.write_bytes(b'original')
         (self.root / 'BUILD_INFO.json').write_text(json.dumps({
-            'version': '1.3.0', 'exe_sha256': digest(exe.read_bytes()),
+            'version': VERSION, 'exe_sha256': digest(exe.read_bytes()),
             'inputs': {'main.py': digest(source.read_bytes())},
         }), encoding='utf-8')
         verify_build(self.root, exe)

@@ -1,4 +1,4 @@
-"""Сборка локального комплекта v1.3.0; ничего не публикует и не меняет настройки."""
+"""Сборка локального комплекта v1.3.1; ничего не публикует и не меняет настройки."""
 
 import argparse
 import hashlib
@@ -29,7 +29,7 @@ def main():
     parser.add_argument('--package-dir', type=Path, help='Отдельная папка комплекта, если прежний EXE запущен')
     args = parser.parse_args()
     dist = root / 'dist'
-    package = (args.package_dir or dist / 'Flowery-v1.3.0-portable').resolve()
+    package = (args.package_dir or dist / 'Flowery-v1.3.1-portable').resolve()
     env = os.environ.copy()
     env['FLOWERY_HOME'] = str(root / 'build/user-data')
     env['PYTHONIOENCODING'] = 'utf-8'
@@ -54,7 +54,7 @@ def main():
             shutil.copy2(root / 'packaging' / name, package / name)
     digest = hashlib.sha256((package / 'Flowery.exe').read_bytes()).hexdigest()
     import PyInstaller
-    info = json.dumps({'version': '1.3.0', 'exe_sha256': digest,
+    info = json.dumps({'version': '1.3.1', 'exe_sha256': digest,
                        'python': sys.version, 'pyinstaller': PyInstaller.__version__,
                        'inputs': inputs}, indent=2, ensure_ascii=False) + '\n'
     for target in (dist, package):

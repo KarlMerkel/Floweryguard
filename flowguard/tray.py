@@ -15,7 +15,7 @@ from typing import Optional, Callable
 try:
     from flowguard import __version__
 except Exception:
-    __version__ = "1.3.0"
+    __version__ = "1.3.1"
 
 logger = logging.getLogger("Flowery.Tray")
 
