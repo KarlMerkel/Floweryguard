@@ -1,5 +1,6 @@
 import unittest
 import socket
+from unittest.mock import patch
 from flowguard.proxy import DPIBypassProxy, is_gaming_host, parse_sni
 from flowguard.config import Config
 from flowguard.system_proxy import build_proxy_override
@@ -90,15 +91,16 @@ class TestGamingCompatibility(unittest.TestCase):
         self.assertEqual(eff_host, "api.helldivers2.dev")
         self.assertEqual(mock_target.sent_data, bytearray(b"NON_TLS_GAME_PACKET"))
 
-    def test_mtu_manager_skips_ethernet(self):
+    def test_mtu_manager_skips_secondary_ethernet(self):
         mgr = MTUManager(target_mtu=1420)
         # Mock active interfaces containing Ethernet
         mgr.get_active_interfaces = lambda: [
             ("Ethernet 2", 1500),
             ("VirtualBox Host-Only Ethernet Adapter", 1500),
         ]
-        # Should not mutate Ethernet MTUs
-        applied = mgr.apply_mtu()
+        # Второстепенный Ethernet без шлюза не меняется; реальная сеть ПК не участвует.
+        with patch.object(mgr, 'get_default_gateway_interfaces', return_value=[]):
+            applied = mgr.apply_mtu()
         self.assertFalse(applied)
         self.assertEqual(len(mgr.original_mtus), 0)
 

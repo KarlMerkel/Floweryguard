@@ -22,6 +22,7 @@ import struct
 import queue
 import weakref
 from .route_health import RouteHealth
+from .route_recovery import RecoveryRoutes, CDN_RECOVERY_CANDIDATES
 from .tls_transport import relay_tls
 from .tls_parser import collect_client_hello
 from typing import Optional, Tuple, List, Dict, Any, Set
@@ -735,6 +736,7 @@ class DPIBypassProxy:
     def __init__(self, config: Config):
         self.config = config
         self.route_health = RouteHealth()
+        self.route_recovery = RecoveryRoutes()
         self.host = config.proxy_host
         self.port = config.proxy_port
         self.buffer_size = config.buffer_size
@@ -829,6 +831,8 @@ class DPIBypassProxy:
 
     def start(self) -> None:
         """Запускает слушающий сокет прокси сервера."""
+        if getattr(self, 'route_recovery', None) is None:
+            self.route_recovery = RecoveryRoutes()
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -904,6 +908,10 @@ class DPIBypassProxy:
     def stop(self) -> None:
         """Останавливает сервер и сохраняет обученные веса стратегий."""
         self.is_running = False
+        recovery = getattr(self, 'route_recovery', None)
+        if recovery is not None:
+            recovery.close()
+            self.route_recovery = None
         if self.warmup_harvester:
             try:
                 self.warmup_harvester.stop()
@@ -1212,6 +1220,37 @@ class DPIBypassProxy:
         if network is None:
             network = getattr(getattr(self, "strategy_engine", None), "_current_network", "default")
         self.route_health.record(network, host, port, ip, "suspect")
+        recovery = getattr(self, 'route_recovery', None)
+        if recovery is not None:
+            recovery.reject(network, host, port, ip)
+
+    def _discover_tls_route(self, host, port, preferred, budget):
+        """После отказа Discord проверяет кандидатов CDN, не изменяя hosts или оценки."""
+        recovery = getattr(self, 'route_recovery', None)
+        if (recovery is None or not self.is_running or port != 443 or budget <= 0
+                or not is_discord_network_host(host)
+                or _configured_host_ip(host, getattr(self, 'config', None))):
+            return None
+        network = getattr(self.strategy_engine, '_current_network', 'default')
+        fixed = self._fixed_strategy(host)
+        methods = [fixed] if fixed is not None else list(dict.fromkeys([
+            preferred, 'direct', 'tcp_split_sni_mid', 'tls_record_frag',
+            'combo_tlsrec_tcpsplit', 'tcp_split_sni_start', 'multi_split']))
+        methods = [method for method in methods
+                   if self.strategy_engine.allowed_strategy(method) == method
+                   and hasattr(StrategyExecutor, method)]
+        recent = [ip for ip in self.route_health.proven_ips(network, port)
+                  if is_cloudflare_anycast_ip(ip)]
+        candidates = list(dict.fromkeys(list(CDN_RECOVERY_CANDIDATES) + recent))[:8]
+        pairs = [(ip, method) for method in methods for ip in candidates
+                 if not is_bogon_or_sinkhole_ip(ip)]
+        result = recovery.find(network, host, port, pairs, min(2.5, budget))
+        if not self.is_running or network != getattr(self.strategy_engine, '_current_network', 'default'):
+            return None
+        if result:
+            logger.info('[Восстановление] %s:%s: TLS-сертификат резервного маршрута %s проверен; '
+                        'техника %s, проверка передачи — на клиентском соединении', host, port, *result)
+        return result
 
     def _connect_target(self, host: str, port: int, exclude_ip: Optional[Any] = None, target_ip: Optional[str] = None, timeout: Optional[float] = None) -> Optional[socket.socket]:
         """Устанавливает соединение с целевым сервером с авто-перебором IP, фильтрацией мертвых IP и Happy Eyeballs.
@@ -1521,6 +1560,10 @@ class DPIBypassProxy:
                               if ip not in excluded_set and available(ip)]
 
         # Передача данных важнее доступности TCP и начального приоритета Anycast.
+        recovery = getattr(self, 'route_recovery', None)
+        hint = recovery.get(network, host, port) if recovery is not None else None
+        if hint and hint[0] not in excluded_set and available(hint[0]):
+            candidate_ips = [hint[0]] + [ip for ip in candidate_ips if ip != hint[0]]
         if health:
             candidate_ips = health.rank(network, host, port, candidate_ips)
 
@@ -1927,6 +1970,11 @@ class DPIBypassProxy:
         for candidate in health.progressing_strategies(network, host, port, ip):
             if candidate not in avoid and self.strategy_engine.allowed_strategy(candidate) == candidate:
                 return candidate
+        recovery = getattr(self, 'route_recovery', None)
+        hint = recovery.get(network, host, port) if recovery is not None else None
+        if (hint and hint[0] == ip and hint[1] not in avoid
+                and self.strategy_engine.allowed_strategy(hint[1]) == hint[1]):
+            return hint[1]
         if selected not in avoid:
             return selected
         with self._whitelist_lock:
@@ -2096,6 +2144,26 @@ class DPIBypassProxy:
         _WORKING_IP_CACHE.pop(effective_host, None)
         if remaining_budget() <= 0:
             return None, strat1, effective_host, None
+
+        # Проверяем резерв вне пользовательского TLS-сеанса, затем повторяем
+        # только исходный ClientHello. Данные приложения ещё не отправлялись.
+        recovered = self._discover_tls_route(effective_host, target_port, strat1, remaining_budget())
+        if recovered and remaining_budget() > 0:
+            recovery_ip, recovery_strategy = recovered
+            recovery_sock = self._try_direct_connect(
+                recovery_ip, target_port, timeout=min(1.0, remaining_budget()))
+            if recovery_sock:
+                try:
+                    self._safe_execute_strategy(recovery_strategy, recovery_sock, first_packet, host=effective_host)
+                    recovery_rtt = _get_socket_meta(recovery_sock).get('connect_rtt', 0.05)
+                    status, response, _ = probe(recovery_sock, recovery_ip, recovery_strategy, recovery_rtt, 'резерв')
+                    if status == 'success':
+                        return recovery_sock, recovery_strategy, effective_host, response
+                except OSError:
+                    failed(recovery_ip, recovery_strategy, 'send_error')
+                _safe_close_socket(recovery_sock)
+            else:
+                failed(recovery_ip, recovery_strategy, 'connect_error')
 
         is_yt = is_google_or_youtube_host(effective_host.lower())
         is_dc = is_discord_host(effective_host)
