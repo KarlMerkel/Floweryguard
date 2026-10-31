@@ -20,8 +20,9 @@ class LiveLogTests(unittest.TestCase):
                 patch('flowguard.main.shutil.get_terminal_size', return_value=Mock(columns=120)), \
                 patch('flowguard.main.os.system'), patch('sys.stdout', output):
             app.render_menu()
-        for text in ('Живой журнал', 'Проверить сертификат', 'Выход'):
+        for text in ('Живой журнал', 'Выход'):
             self.assertIn(text, output.getvalue())
+        self.assertNotIn('Проверить сертификат', output.getvalue())
 
     def test_bounded_history_and_control_characters(self):
         handler = log_module.LiveLogHandler(capacity=2)

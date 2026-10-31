@@ -1212,7 +1212,6 @@ class FloweryApp:
             "   [93m17.[0m [97mОбновить базу доменов    [0m [90m(онлайн sync)[0m",
             "   [93m18.[0m [97mОтправить лог разработчику[0m [92m[Поддержка][0m",
             "   [93m19.[0m [97mЖивой журнал соединений[0m",
-            "   [93m20.[0m [97mПроверить сертификат сайта[0m",
             "",
             sep,
             "   [93m0.[0m [97mВыход (с восстановлением системы)[0m",
@@ -1263,7 +1262,7 @@ class FloweryApp:
             self.render_menu()
             choice = ""
             try:
-                choice = input("\033[1;93mВыберите пункт (0-20):\033[0m ").strip()
+                choice = input("\033[1;93mВыберите пункт (0-19):\033[0m ").strip()
             except EOFError:
                 try:
                     sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="replace")
@@ -1400,25 +1399,8 @@ class FloweryApp:
                     logger.warning('[Журнал] Не удалось открыть отдельное окно')
                     print('Не удалось открыть окно журнала. Файл доступен через пункт 16.')
                     time.sleep(1.5)
-            elif choice == "20":
-                from flowguard.certificate_diagnostics import check_certificate
-                try:
-                    host = input('Имя сайта для проверки сертификата (без URL): ').strip()
-                    if host:
-                        routes = [None]
-                        if self.proxy_server.is_running:
-                            routes.append((self.proxy_server.host, self.proxy_server.port))
-                        for route in routes:
-                            result = check_certificate(host, proxy=route)
-                            print(json.dumps(result, ensure_ascii=False, indent=2))
-                            logger.info('[Сертификат] %s', json.dumps(result, ensure_ascii=False))
-                        input('Enter — вернуться в меню...')
-                except (ValueError, UnicodeError) as error:
-                    print(str(error))
-                except (KeyboardInterrupt, EOFError):
-                    logger.debug('[Сертификат] проверка прервана пользователем')
             else:
-                print("\033[91mНеверный выбор. Введите число от 0 до 20.\033[0m")
+                print("\033[91mНеверный выбор. Введите число от 0 до 19.\033[0m")
                 time.sleep(1.0)
 
     def print_banner(self) -> None:
