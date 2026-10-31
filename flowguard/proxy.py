@@ -1004,7 +1004,7 @@ class DPIBypassProxy:
                 route_network = getattr(getattr(self, 'strategy_engine', None), '_current_network', 'default')
                 logger.debug('[CONNECT] %s:%s: разрешение адреса и подключение', target_host, target_port)
                 connect_started = time.monotonic()
-                target_sock = self._connect_target(target_host, target_port)
+                target_sock = self._connect_with_recovery(target_host, target_port, route_network)
                 logger.debug('[CONNECT] %s:%s: tcp=%s за %.3f с', target_host, target_port,
                              'connected' if target_sock else 'failed', time.monotonic() - connect_started)
                 if not target_sock:
@@ -1224,14 +1224,42 @@ class DPIBypassProxy:
         if recovery is not None:
             recovery.reject(network, host, port, ip)
 
-    def _discover_tls_route(self, host, port, preferred, budget):
+    def _recovery_enabled_for(self, host, port):
+        return (getattr(self, 'route_recovery', None) is not None and self.is_running
+                and port == 443
+                and (is_discord_network_host(host) or _matches_domain(host, ('discord.media',)))
+                and not _configured_host_ip(host, getattr(self, 'config', None)))
+
+    def _connect_with_recovery(self, host, port, network):
+        """Пробует проверенный резерв до ответа 502, когда обычные TCP-маршруты отказали."""
+        sock = self._connect_target(host, port)
+        if sock is not None or not self._recovery_enabled_for(host, port):
+            return sock
+        preferred = self._fixed_strategy(host) or self.strategy_engine.select_strategy(
+            host, is_discord=True)
+        recovered = self._discover_tls_route(host, port, preferred, 2.5, expected_network=network)
+        if not recovered:
+            return None
+        ip, _ = recovered
+        sock = self._try_direct_connect(ip, port, timeout=1.0)
+        if not self.is_running or network != getattr(self.strategy_engine, '_current_network', 'default'):
+            if sock is not None:
+                _safe_close_socket(sock)
+            return None
+        if sock is None:
+            self._record_route_failure(host, port, ip, network)
+        else:
+            logger.info('[Восстановление TCP] %s:%s: подключён проверенный резерв %s', host, port, ip)
+        return sock
+
+    def _discover_tls_route(self, host, port, preferred, budget, expected_network=None):
         """После отказа Discord проверяет кандидатов CDN, не изменяя hosts или оценки."""
         recovery = getattr(self, 'route_recovery', None)
-        if (recovery is None or not self.is_running or port != 443 or budget <= 0
-                or not (is_discord_network_host(host) or _matches_domain(host, ('discord.media',)))
-                or _configured_host_ip(host, getattr(self, 'config', None))):
+        if recovery is None or budget <= 0 or not self._recovery_enabled_for(host, port):
             return None
         network = getattr(self.strategy_engine, '_current_network', 'default')
+        if expected_network is not None and network != expected_network:
+            return None
         fixed = self._fixed_strategy(host)
         methods = [fixed] if fixed is not None else list(dict.fromkeys([
             preferred, 'direct', 'tcp_split_sni_mid', 'tls_record_frag',
@@ -1243,7 +1271,8 @@ class DPIBypassProxy:
                   if is_cloudflare_anycast_ip(ip)]
         candidates = list(dict.fromkeys(list(CDN_RECOVERY_CANDIDATES) + recent))[:8]
         pairs = [(ip, method) for method in methods for ip in candidates
-                 if not is_bogon_or_sinkhole_ip(ip)]
+                 if not is_bogon_or_sinkhole_ip(ip)
+                 and method not in self.route_health.stalled_strategies(network, host, port, ip)]
         result = recovery.find(network, host, port, pairs, min(2.5, budget))
         if not self.is_running or network != getattr(self.strategy_engine, '_current_network', 'default'):
             return None
@@ -1562,10 +1591,16 @@ class DPIBypassProxy:
         # Передача данных важнее доступности TCP и начального приоритета Anycast.
         recovery = getattr(self, 'route_recovery', None)
         hint = recovery.get(network, host, port) if recovery is not None else None
-        if hint and hint[0] not in excluded_set and available(hint[0]):
+        usable_hint = bool(hint and hint[0] not in excluded_set and available(hint[0]))
+        if usable_hint:
             candidate_ips = [hint[0]] + [ip for ip in candidate_ips if ip != hint[0]]
         if health:
             candidate_ips = health.rank(network, host, port, candidate_ips)
+            if usable_hint:
+                # Новая проверенная техника может восстановить ранее подозрительный IP.
+                # Проба не заменяет наблюдаемую передачу и не меняет её оценку.
+                proven = [ip for ip in candidate_ips if health.status(network, host, port, ip) == 'progress']
+                candidate_ips = list(dict.fromkeys(proven + [hint[0]] + candidate_ips))
 
         # 5. Если кандидат всего один - прямое подключение
         if len(candidate_ips) == 1:
@@ -2404,12 +2439,21 @@ class DPIBypassProxy:
             if suspect_recorded or long_lived:
                 return
             suspect_recorded = True
-            self.route_health.record(network, host, port, target_ip, 'suspect')
+            self._record_route_failure(host, port, target_ip, network)
             self.route_health.record_strategy(network, host, port, target_ip, strategy, 'suspect')
             logger.info(
                 '[Маршрут] %s:%s через %s: ожидание ответа/частичной TLS-записи после %s байт (%s, техника %s); '
                 'приоритет адреса временно снижен для новых соединений',
                 host, port, target_ip, progress.server_bytes, reason, strategy)
+            recovery = getattr(self, 'route_recovery', None)
+            if (recovery is not None and self._recovery_enabled_for(host, port)
+                    and network == getattr(self.strategy_engine, '_current_network', 'default')):
+                def recover_next_connection():
+                    # Не повторяем запрос: результат получит только новое подключение.
+                    if self.route_recovery is recovery:
+                        self._discover_tls_route(host, port, strategy, 2.5, expected_network=network)
+                if recovery.schedule(recover_next_connection):
+                    logger.info('[Восстановление передачи] %s:%s: поиск резерва для следующего подключения', host, port)
 
         try:
             progress, reason = relay_tls(

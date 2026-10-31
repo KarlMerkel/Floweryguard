@@ -2,6 +2,7 @@
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 import ipaddress
+import logging
 import socket
 import ssl
 import threading
@@ -72,6 +73,8 @@ class RecoveryRoutes:
         self._lock = threading.Lock()
         self._gate = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='RouteRecovery')
+        self._background_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='RouteRecoveryControl')
+        self._background = None
         self._active = []
         self._states = OrderedDict()
         self._closed = False
@@ -138,11 +141,29 @@ class RecoveryRoutes:
         finally:
             self._gate.release()
 
+    def schedule(self, callback):
+        """Одна фоновая задача без очереди: обработчик передачи не ждёт сетевых проб."""
+        with self._lock:
+            if self._closed or (self._background is not None and not self._background.done()):
+                return False
+            self._background = self._background_pool.submit(self._run_background, callback)
+            return True
+
+    @staticmethod
+    def _run_background(callback):
+        try:
+            callback()
+        except Exception:
+            logging.getLogger('Flowery.Recovery').exception('Ошибка фонового поиска маршрута')
+
     def close(self):
         with self._lock:
             self._closed = True
             self._states.clear()
             for future in self._active:
                 future.cancel()
+            if self._background is not None:
+                self._background.cancel()
         # Уже начатые пробы имеют общий короткий deadline; новых задач не будет.
         self._pool.shutdown(wait=False)
+        self._background_pool.shutdown(wait=False)

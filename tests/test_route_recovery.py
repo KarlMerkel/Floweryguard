@@ -1,11 +1,14 @@
 """Резервный маршрут проверяет TLS и не подменяет наблюдения о загрузке."""
 import ssl
+import socket
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
 from flowguard.route_recovery import RecoveryRoutes, verify_tls_route
-from flowguard.proxy import DPIBypassProxy, _set_socket_meta
+from flowguard.proxy import (DPIBypassProxy, _set_socket_meta, _get_socket_meta,
+                             _RESOLVED_IPS_CACHE, _WORKING_IP_CACHE)
+from flowguard.route_health import RouteHealth, TransferProgress
 
 
 class TestRecoveryRoutes(unittest.TestCase):
@@ -89,6 +92,23 @@ class TestRecoveryRoutes(unittest.TestCase):
                 self.assertFalse(verify_tls_route('discord.com', 443, ip, 'direct', 1))
                 connect.assert_not_called()
 
+    def test_background_work_is_bounded_and_close_rejects_new_tasks(self):
+        entered, release = threading.Event(), threading.Event()
+        manager = self.manager(Mock(return_value=False))
+
+        def work():
+            entered.set()
+            release.wait(2)
+
+        self.addCleanup(release.set)
+        self.assertTrue(manager.schedule(work))
+        self.assertTrue(entered.wait(1))
+        for _ in range(20):
+            self.assertFalse(manager.schedule(work))
+        manager.close()
+        self.assertFalse(manager.schedule(work))
+        release.set()
+
 
 class TestRecoveryIntegration(unittest.TestCase):
     def setUp(self):
@@ -102,6 +122,7 @@ class TestRecoveryIntegration(unittest.TestCase):
         self.proxy._fixed_strategy = Mock(return_value=None)
         self.proxy.route_health = Mock()
         self.proxy.route_health.proven_ips.return_value = []
+        self.proxy.route_health.stalled_strategies.return_value = set()
 
     def test_discovery_never_rewards_strategy(self):
         result = self.proxy._discover_tls_route('discord.com', 443, 'tls_record_frag', 2)
@@ -160,3 +181,101 @@ class TestRecoveryIntegration(unittest.TestCase):
         with patch('flowguard.proxy._configured_host_ip', return_value='1.1.1.1'):
             self.assertIsNone(self.proxy._discover_tls_route('discord.com', 443, 'direct', 2))
         self.proxy.route_recovery.find.assert_not_called()
+
+    def test_connect_handler_recovers_before_returning_502(self):
+        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        tls = ssl.create_default_context().wrap_bio(incoming, outgoing, server_hostname='discord.com')
+        with self.assertRaises(ssl.SSLWantReadError):
+            tls.do_handshake()
+        hello = outgoing.read()
+        client, upstream = Mock(spec=socket.socket), Mock(spec=socket.socket)
+        client.recv.return_value = b'CONNECT discord.com:443 HTTP/1.1\r\n\r\n' + hello
+        self.proxy._lock = threading.Lock()
+        self.proxy._concurrency_sem = threading.BoundedSemaphore(1)
+        self.proxy._concurrency_sem.acquire()
+        self.proxy.active_connections = 1
+        self.proxy.timeout, self.proxy.buffer_size = 15, 65536
+        self.proxy._connect_target = Mock(return_value=None)
+        self.proxy._discover_tls_route = Mock(return_value=('8.6.112.0', 'tls_record_frag'))
+        self.proxy._try_direct_connect = Mock(return_value=upstream)
+        self.proxy._handshake_with_fast_fallback = Mock(return_value=(upstream, 'tls_record_frag', 'discord.com', b'hello'))
+        self.proxy._pipe_sockets = Mock()
+        self.proxy._handle_client(client, ('127.0.0.1', 12345))
+        self.proxy._discover_tls_route.assert_called_once()
+        self.proxy._handshake_with_fast_fallback.assert_called_once_with(
+            client, upstream, 'discord.com', 443, hello)
+        self.assertFalse(any(b'502' in call.args[0] for call in client.sendall.call_args_list))
+        self.proxy._pipe_sockets.assert_called_once()
+
+    def simulate_late_failure(self, *, complete=False, network='wifi'):
+        self.proxy.route_health = RouteHealth()
+        self.proxy.timeout, self.proxy.buffer_size = 15, 65536
+        self.proxy.bytes_rx = self.proxy.bytes_tx = 0
+        client, upstream = Mock(spec=socket.socket), Mock(spec=socket.socket)
+        _set_socket_meta(upstream, '8.6.112.0', 0.01)
+        progress = TransferProgress()
+        progress.received(14000, 1, data=(b'\x17\x03\x03' +
+                          (13995 if complete else 16384).to_bytes(2, 'big') + b'x' * 13995))
+
+        def relay(*args, **kwargs):
+            if not complete:
+                kwargs['on_suspect'](progress, 'idle_timeout')
+            return progress, 'idle_timeout'
+
+        self.proxy._safe_execute_strategy = Mock()
+        with patch('flowguard.proxy.relay_tls', side_effect=relay):
+            self.proxy._pipe_tls(client, upstream, 'cdn.discordapp.com', 'tls_record_frag',
+                                 443, False, network)
+        return client, upstream
+
+    def test_late_stall_schedules_once_and_does_not_replay_request(self):
+        client, upstream = self.simulate_late_failure()
+        self.proxy.route_recovery.reject.assert_called_with('wifi', 'cdn.discordapp.com', 443, '8.6.112.0')
+        self.proxy.route_recovery.schedule.assert_called_once()
+        self.proxy.route_recovery.find.assert_not_called()
+        callback = self.proxy.route_recovery.schedule.call_args.args[0]
+        callback()
+        self.proxy.route_recovery.find.assert_called_once()
+        pairs = self.proxy.route_recovery.find.call_args.args[3]
+        self.assertNotIn(('8.6.112.0', 'tls_record_frag'), pairs)
+        client.sendall.assert_not_called()
+        upstream.sendall.assert_not_called()
+        self.proxy._safe_execute_strategy.assert_not_called()
+        self.proxy.strategy_engine.record_success.assert_not_called()
+
+    def test_scheduled_probe_does_not_migrate_to_changed_network(self):
+        self.simulate_late_failure()
+        self.proxy.strategy_engine._current_network = 'phone'
+        self.proxy.route_recovery.schedule.call_args.args[0]()
+        self.proxy.route_recovery.find.assert_not_called()
+
+    def test_complete_small_response_does_not_launch_recovery(self):
+        self.simulate_late_failure(complete=True)
+        self.proxy.route_recovery.schedule.assert_not_called()
+
+    def test_old_connection_does_not_schedule_in_new_network(self):
+        self.simulate_late_failure(network='old-wifi')
+        self.proxy.route_recovery.schedule.assert_not_called()
+
+    def test_verified_new_technique_can_reuse_suspect_ip_but_real_progress_wins(self):
+        import time
+        host, recovered_ip, dns_ip = 'cdn.discordapp.com', '8.6.112.0', '1.1.1.1'
+        self.proxy.timeout = 2
+        self.proxy.dns_failover = self.proxy.doh_harvester = None
+        self.proxy.route_health = RouteHealth()
+        self.proxy.route_recovery.get.return_value = (recovered_ip, 'tls_record_frag')
+        self.proxy.route_health.record('wifi', host, 443, recovered_ip, 'suspect')
+        self.proxy.route_health.record_strategy('wifi', host, 443, recovered_ip, 'direct', 'suspect')
+        key = self.proxy._resolved_cache_key(host)
+        _WORKING_IP_CACHE.pop(host, None)
+        _RESOLVED_IPS_CACHE.set(key, (time.time(), [dns_ip]))
+        self.addCleanup(_RESOLVED_IPS_CACHE.pop, key, None)
+        self.addCleanup(_WORKING_IP_CACHE.pop, host, None)
+        for proven, expected in [(False, recovered_ip), (True, dns_ip)]:
+            if proven:
+                self.proxy.route_health.record('wifi', host, 443, dns_ip, 'progress')
+            sock = Mock(spec=socket.socket)
+            sock.connect_ex.return_value = 0
+            with self.subTest(proven=proven), patch('flowguard.proxy.socket.socket', return_value=sock):
+                connected = self.proxy._connect_target(host, 443)
+                self.assertEqual(_get_socket_meta(connected)['target_ip'], expected)
