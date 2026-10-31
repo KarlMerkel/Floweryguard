@@ -117,9 +117,18 @@ class TestRecoveryIntegration(unittest.TestCase):
         self.assertTrue(all(strategy == 'direct' for _, strategy in pairs))
 
     def test_unrelated_domain_and_other_port_do_not_trigger_discovery(self):
-        for host, port in [('discord.com.example', 443), ('discord.com', 8443)]:
+        for host, port in [('discord.com.example', 443), ('discord.com', 8443),
+                           ('finland14042.discord.media.example', 443),
+                           ('finland14042.discord.media', 50000)]:
             self.assertIsNone(self.proxy._discover_tls_route(host, port, 'direct', 2))
         self.proxy.route_recovery.find.assert_not_called()
+
+    def test_voice_signaling_host_uses_verified_tls_recovery(self):
+        result = self.proxy._discover_tls_route('finland14042.discord.media', 443, 'tls_record_frag', 2)
+        self.assertEqual(result, ('8.6.112.0', 'tls_record_frag'))
+        self.proxy.route_recovery.find.assert_called_once()
+        self.assertEqual(self.proxy.route_recovery.find.call_args.args[:3],
+                         ('wifi', 'finland14042.discord.media', 443))
 
     def test_network_change_during_probe_discards_result(self):
         def switch(*args):

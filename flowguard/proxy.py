@@ -1228,7 +1228,7 @@ class DPIBypassProxy:
         """После отказа Discord проверяет кандидатов CDN, не изменяя hosts или оценки."""
         recovery = getattr(self, 'route_recovery', None)
         if (recovery is None or not self.is_running or port != 443 or budget <= 0
-                or not is_discord_network_host(host)
+                or not (is_discord_network_host(host) or _matches_domain(host, ('discord.media',)))
                 or _configured_host_ip(host, getattr(self, 'config', None))):
             return None
         network = getattr(self.strategy_engine, '_current_network', 'default')
