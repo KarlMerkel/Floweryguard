@@ -2,6 +2,7 @@
 и Discord Desktop Startup (chk-webapp, early_connect, EOF symmetrical close).
 """
 
+from test_handshake_wait import hello as real_client_hello
 import unittest
 from unittest.mock import patch, MagicMock
 import socket
@@ -405,11 +406,7 @@ class TestYouTubeDiscordFixes(unittest.TestCase):
         _set_socket_meta(target_sock1, "172.217.132.170", 0.030)
         _set_socket_meta(target_sock2, "172.217.132.170", 0.030)
 
-        client_hello = (
-            b"\x16\x03\x01\x00\x30"
-            + b"\x01\x00\x00\x2c\x03\x03" + b"\x00" * 32
-            + b"\x00\x00\x02\x00\x2f\x01\x00"
-        )
+        client_hello = real_client_hello()
 
         executed_strategies = []
 

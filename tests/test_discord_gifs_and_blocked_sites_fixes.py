@@ -1,5 +1,6 @@
 """Тесты для исправлений Discord Media/GIF (Tenor, Giphy), Cloudflare Anycast и обхода блокировок сайтов."""
 
+from test_handshake_wait import hello as real_client_hello
 import unittest
 from unittest.mock import MagicMock, patch
 import socket
@@ -217,6 +218,7 @@ class TestDiscordGifsAndBlockedSitesFixes(unittest.TestCase):
     def test_fast_fallback_attempt3_deduplication(self):
         """Проверяет, что при сбое combo_tlsrec_tcpsplit в попытке 1/2 он не переназначается в попытке 3 даже для Discord/YouTube."""
         handler = object.__new__(DPIBypassProxy)
+        handler.is_running = False  # Продолжение проверяется на настоящих сокетах.
         handler.timeout = 5.0
         handler.strategy_engine = MagicMock()
         handler.strategy_engine.get_fallback_strategy.return_value = "tcp_split_sni_mid"
@@ -228,7 +230,7 @@ class TestDiscordGifsAndBlockedSitesFixes(unittest.TestCase):
         handler._check_reload_whitelist = MagicMock()
         handler.shadow_prober = None
 
-        first_packet = b"\x16\x03\x01\x00\x10test_client_hello"
+        first_packet = real_client_hello()
         for test_host in ["rutracker.org", "cdn.discordapp.com", "www.youtube.com"]:
             handler.strategy_engine.reset_mock()
             handler._send_tls_client_hello_with_bypass = MagicMock(return_value=("combo_tlsrec_tcpsplit", test_host))

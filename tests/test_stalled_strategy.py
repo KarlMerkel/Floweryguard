@@ -1,4 +1,5 @@
 """После зависания меняется техника конкретного сайта, а не только его адрес."""
+from test_handshake_wait import hello as real_client_hello
 import tempfile
 import threading
 import unittest
@@ -154,7 +155,7 @@ class TestStalledStrategy(unittest.TestCase):
         self.proxy._probe_socket_response = Mock(side_effect=[
             ('silent_drop', None, 800), ('success', b'server hello', 30)])
         with patch('flowguard.proxy.is_tls_client_hello', return_value=True):
-            result = self.proxy._handshake_with_fast_fallback(Mock(), first, host, 443, b'hello')
+            result = self.proxy._handshake_with_fast_fallback(Mock(), first, host, 443, real_client_hello())
         self.assertIs(result[0], rotated)
         return result[1]
 

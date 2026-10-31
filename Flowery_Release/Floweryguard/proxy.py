@@ -24,7 +24,7 @@ import weakref
 from .route_health import RouteHealth
 from .route_recovery import RecoveryRoutes, CDN_RECOVERY_CANDIDATES
 from .tls_transport import relay_tls
-from .tls_parser import collect_client_hello
+from .tls_parser import collect_client_hello, is_replayable_client_hello
 from typing import Optional, Tuple, List, Dict, Any, Set
 try:
     from flowguard.config import Config, load_whitelist_domains, is_host_in_whitelist
@@ -2103,6 +2103,91 @@ class DPIBypassProxy:
     def _tls_probe_timeout(rtt, budget):
         return max(0.0, min(budget, max(1.2, min(3.0, rtt * 4.0 + 0.5))))
 
+    def _continue_tls_selection(self, client, target_host, host, port, data,
+                                network, candidates, preferred, deadline):
+        """Продолжает подбор до первого ответа, не повторяя данные приложения."""
+        failure = (None, preferred, host, None)
+        if not is_replayable_client_hello(data):
+            return failure
+
+        def active():
+            if (time.monotonic() >= deadline or not self.is_running
+                    or network != getattr(self.strategy_engine, '_current_network', 'default')):
+                return False
+            try:
+                ready, _, errors = select.select([client], [], [client], 0)
+                # EOF, отмена или новые байты (возможный 0-RTT): больше не повторяем.
+                return not ready and not errors
+            except (OSError, ValueError):
+                return False
+
+        tried = set()
+        fixed = self._fixed_strategy(host)
+        ipv6 = getattr(getattr(self, 'config', None), 'ipv6_mode', 'disabled') != 'disabled'
+        candidates = list(dict.fromkeys(ip for ip in candidates if ip and (ipv6 or ':' not in ip)))
+        for attempt in range(16):
+            if not active():
+                break
+            chosen = None
+            for ip in self.route_health.rank(network, host, port, candidates):
+                selected = fixed or self.strategy_engine.select_strategy(
+                    host, ip=ip, is_discord=is_discord_host(host),
+                    is_youtube=is_google_or_youtube_host(host))
+                excluded = {method for address, method in tried if address == ip}
+                selected = self._strategy_after_stall(host, port, ip, selected, excluded)
+                selected = self.strategy_engine.allowed_strategy(selected)
+                if (ip, selected) not in tried:
+                    chosen = ip, selected
+                    break
+            if chosen is None:
+                break
+            ip, strategy = chosen
+            tried.add(chosen)
+            self.route_health.note_attempt(network, host, port, ip)
+            sock = self._try_direct_connect(ip, port, timeout=min(0.5, deadline - time.monotonic()))
+            if sock is None:
+                self._record_route_failure(host, port, ip, network)
+                continue
+            keep = False
+            reason = 'send_error'
+            started = time.monotonic()
+            try:
+                if not active():
+                    break
+                sock.settimeout(min(0.5, deadline - time.monotonic()))
+                if self._safe_execute_strategy(strategy, sock, data, host=host):
+                    rtt = _get_socket_meta(sock).get('connect_rtt', 0.05)
+                    until = min(deadline, time.monotonic() + self._tls_probe_timeout(rtt, deadline - time.monotonic()))
+                    reason = 'silent_drop'
+                    while active() and time.monotonic() < until:
+                        ready, _, errors = select.select([sock, client], [], [sock, client],
+                                                        min(0.1, max(0, until - time.monotonic())))
+                        if client in ready or client in errors or not active():
+                            return failure
+                        if sock in errors:
+                            reason = 'socket_error'
+                            break
+                        if sock in ready:
+                            response = sock.recv(self.buffer_size)
+                            if response and response[0] != 0x15 and not response.startswith(b'HTTP/'):
+                                keep = True
+                                return sock, strategy, host, response
+                            reason = 'server_closed_or_alert'
+                            break
+                if active():
+                    self._record_route_failure(host, port, ip, network)
+                    self.route_health.record_strategy(network, host, port, ip, strategy, 'suspect')
+            except OSError:
+                if active():
+                    self._record_route_failure(host, port, ip, network)
+            finally:
+                logger.debug('[TLS-ожидание] %s:%s ip=%s техника=%s попытка=%s '
+                             'прошло=%.3fс результат=%s', host, port, ip, strategy,
+                             attempt + 1, time.monotonic() - started, 'ответ' if keep else reason)
+                if not keep:
+                    _safe_close_socket(sock)
+        return failure
+
     def _handshake_with_fast_fallback(
         self,
         client_sock: socket.socket,
@@ -2142,6 +2227,26 @@ class DPIBypassProxy:
         )
         fixed_strategy = self._fixed_strategy(effective_host)
 
+        def finish_selection(preferred):
+            entry = _RESOLVED_IPS_CACHE.get((network, target_host.lower().rstrip('.')))
+            candidates = []
+            if isinstance(entry, tuple) and len(entry) == 2 and time.time() - entry[0] < 300:
+                candidates = list(entry[1])
+            elif isinstance(entry, str):
+                candidates = [entry]
+            if current_ip:
+                candidates.append(current_ip)
+            manual = _configured_host_ip(target_host, getattr(self, 'config', None))
+            if manual:
+                candidates = [manual]
+            deadline = start_time + 15.0
+            logger.info('[TLS-ожидание] %s:%s: продолжаем подбор в исходном туннеле, '
+                        'осталось %.1f с', effective_host, target_port,
+                        max(0, deadline - time.monotonic()))
+            return self._continue_tls_selection(client_sock, target_host, effective_host,
+                                                target_port, first_packet, network,
+                                                candidates, preferred, deadline)
+
         def failed(ip, strategy, reason):
             # Таймаут/RST не устанавливает причину отказа. Учитываем его только
             # для исходной сети, хоста, порта и адреса, без штрафа всему CDN.
@@ -2177,8 +2282,10 @@ class DPIBypassProxy:
         # 2. Неуспешная первая попытка: Запускаем Transparent Fast-Fallback
         _safe_close_socket(current_sock)
         _WORKING_IP_CACHE.pop(effective_host, None)
-        if remaining_budget() <= 0:
+        if not is_replayable_client_hello(first_packet):
             return None, strat1, effective_host, None
+        if remaining_budget() <= 0:
+            return finish_selection(strat1)
 
         # Проверяем резерв вне пользовательского TLS-сеанса, затем повторяем
         # только исходный ClientHello. Данные приложения ещё не отправлялись.
@@ -2246,7 +2353,7 @@ class DPIBypassProxy:
 
         # Попытка 3: ДРУГОЙ живой IP
         if remaining_budget() <= 0:
-            return None, strat1, effective_host, None
+            return finish_selection(strat1)
         connect_to3 = min(2.5, remaining_budget() * 0.7)
         exclude_set = {current_ip} if current_ip else set()
         new_sock = self._connect_target(target_host, target_port, exclude_ip=exclude_set, timeout=connect_to3)
@@ -2257,7 +2364,7 @@ class DPIBypassProxy:
             target_err_ip = current_ip
             if target_err_ip:
                 self._record_route_failure(effective_host, target_port, target_err_ip, network)
-            return None, strat1, effective_host, None
+            return finish_selection(strat1)
 
         meta_new = _get_socket_meta(new_sock)
         new_ip = meta_new.get("target_ip", current_ip)
@@ -2297,13 +2404,13 @@ class DPIBypassProxy:
         if not self._safe_execute_strategy(strat3, new_sock, first_packet, host=effective_host):
             failed(new_ip, strat3, 'send_error')
             _safe_close_socket(new_sock)
-            return None, strat3, effective_host, None
+            return finish_selection(strat3)
 
         status3, resp3, _ = probe(new_sock, new_ip, strat3, base_rtt_new, 3)
         if status3 == "success":
             return new_sock, strat3, effective_host, resp3
         _safe_close_socket(new_sock)
-        return None, strat3, effective_host, None
+        return finish_selection(strat3)
     def _obfuscate_http_request(self, raw_req: bytes, host: Optional[str] = None) -> bytes:
         """Техника 4: HTTP Host Obfuscation & Whitelist Spoofing."""
         if host and is_gaming_host(host):

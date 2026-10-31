@@ -1,4 +1,5 @@
 """Регрессии адаптации из пользовательских логов 28 октября."""
+from test_handshake_wait import hello as real_client_hello
 import socket
 import threading
 import time
@@ -26,6 +27,7 @@ class NetworkAuditTests(unittest.TestCase):
 
     def make_proxy(self):
         proxy = object.__new__(DPIBypassProxy)
+        proxy.is_running = False  # Здесь проверяются только первые попытки.
         proxy.route_health = RouteHealth()
         proxy.strategy_engine = Mock()
         proxy.strategy_engine._current_network = 'audit-network'
@@ -54,7 +56,7 @@ class NetworkAuditTests(unittest.TestCase):
                 with patch('flowguard.proxy.is_tls_client_hello', return_value=True), \
                         patch('flowguard.proxy._get_socket_meta', side_effect=metadata), \
                         patch('flowguard.proxy._safe_close_socket'):
-                    proxy._handshake_with_fast_fallback(Mock(), first, 'rr1.googlevideo.com', 443, b'hello')
+                    proxy._handshake_with_fast_fallback(Mock(), first, 'rr1.googlevideo.com', 443, real_client_hello())
                 self.assertEqual(proxy.route_health.status('audit-network', 'rr1.googlevideo.com', 443, '192.0.2.1'), 'suspect')
                 self.assertIn('direct', proxy.route_health.stalled_strategies('audit-network', 'rr1.googlevideo.com', 443, '192.0.2.1'))
                 if last_status != 'success':
@@ -85,7 +87,7 @@ class NetworkAuditTests(unittest.TestCase):
         proxy._send_tls_client_hello_with_bypass.side_effect = hello
         with patch('flowguard.proxy.is_tls_client_hello', return_value=True), \
                 patch('flowguard.proxy._get_socket_meta', return_value={'target_ip': '192.0.2.1', 'connect_rtt': .01}):
-            result = proxy._handshake_with_fast_fallback(Mock(), client, 'audit.example', 443, b'hello')
+            result = proxy._handshake_with_fast_fallback(Mock(), client, 'audit.example', 443, real_client_hello())
         self.assertIs(result[0], client)
         self.assertEqual(result[3], b'\x16\x03\x03\x00\x01x')
 

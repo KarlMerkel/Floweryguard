@@ -61,6 +61,43 @@ def collect_client_hello(sock, data: bytes, timeout: float, limit: int = 65536) 
         sock.settimeout(previous_timeout)
 
 
+def is_replayable_client_hello(data: bytes) -> bool:
+    """Разрешает повтор только полного ClientHello и необязательного TLS 1.3 CCS."""
+    offset = 0
+    handshake = bytearray()
+    saw_ccs = False
+    while offset < len(data):
+        if offset + 5 > len(data) or data[offset + 1] != 3:
+            return False
+        size = int.from_bytes(data[offset + 3:offset + 5], 'big')
+        end = offset + 5 + size
+        if not 0 < size <= 16384 or end > len(data):
+            return False
+        payload = data[offset + 5:end]
+        if data[offset] == 22 and not saw_ccs:
+            handshake.extend(payload)
+        elif data[offset] == 20 and payload == b'\x01' and handshake and not saw_ccs:
+            saw_ccs = True
+        else:
+            return False
+        offset = end
+    if len(handshake) < 4 or handshake[0] != 1:
+        return False
+    if len(handshake) != 4 + int.from_bytes(handshake[1:4], 'big'):
+        return False
+    # Не повторяем даже предложение 0-RTT: данные могут прийти отдельно.
+    if len(handshake) > 65535:
+        return False
+    normalized = b'\x16\x03\x03' + len(handshake).to_bytes(2, 'big') + handshake
+    info = _parse_extensions_info(normalized)
+    if not info:
+        return False
+    position, size, extensions = info
+    return (position + 2 + size == len(normalized)
+            and sum(length for _, _, length in extensions) == size
+            and all(kind != 42 for kind, _, _ in extensions))
+
+
 def is_tls_client_hello(data: bytes) -> bool:
     """Проверяет, является ли пакет TLS ClientHello."""
     if len(data) < 9:

@@ -1,4 +1,5 @@
 """Резервный маршрут проверяет TLS и не подменяет наблюдения о загрузке."""
+from test_handshake_wait import hello as real_client_hello
 import ssl
 import socket
 import threading
@@ -167,7 +168,7 @@ class TestRecoveryIntegration(unittest.TestCase):
         self.proxy._safe_execute_strategy = Mock()
         self.proxy._probe_socket_response = Mock(side_effect=[
             ('silent_drop', None, 1200), ('success', b'server hello', 20)])
-        hello = b'original client hello'
+        hello = real_client_hello()
         with patch('flowguard.proxy.is_tls_client_hello', return_value=True):
             sock, strategy, host, response = self.proxy._handshake_with_fast_fallback(
                 client, first, 'discord.com', 443, hello)
