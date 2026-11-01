@@ -1252,7 +1252,7 @@ class DPIBypassProxy:
             logger.info('[Восстановление TCP] %s:%s: подключён проверенный резерв %s', host, port, ip)
         return sock
 
-    def _discover_tls_route(self, host, port, preferred, budget, expected_network=None):
+    def _discover_tls_route(self, host, port, preferred, budget, expected_network=None, cancelled=None):
         """После отказа Discord проверяет кандидатов CDN, не изменяя hosts или оценки."""
         recovery = getattr(self, 'route_recovery', None)
         if recovery is None or budget <= 0 or not self._recovery_enabled_for(host, port):
@@ -1273,7 +1273,12 @@ class DPIBypassProxy:
         pairs = [(ip, method) for method in methods for ip in candidates
                  if not is_bogon_or_sinkhole_ip(ip)
                  and method not in self.route_health.stalled_strategies(network, host, port, ip)]
-        result = recovery.find(network, host, port, pairs, min(2.5, budget))
+        def stopped():
+            return (not self.is_running
+                    or network != getattr(self.strategy_engine, '_current_network', 'default')
+                    or (cancelled is not None and cancelled()))
+
+        result = recovery.find(network, host, port, pairs, min(2.5, budget), cancelled=stopped)
         if not self.is_running or network != getattr(self.strategy_engine, '_current_network', 'default'):
             return None
         if result:
@@ -2125,11 +2130,21 @@ class DPIBypassProxy:
         fixed = self._fixed_strategy(host)
         ipv6 = getattr(getattr(self, 'config', None), 'ipv6_mode', 'disabled') != 'disabled'
         candidates = list(dict.fromkeys(ip for ip in candidates if ip and (ipv6 or ':' not in ip)))
+        next_recovery = 0.0
         for attempt in range(16):
             if not active():
                 break
             chosen = None
-            for ip in self.route_health.rank(network, host, port, candidates):
+            if time.monotonic() >= next_recovery:
+                recovered = self._discover_tls_route(
+                    host, port, preferred, deadline - time.monotonic(),
+                    expected_network=network, cancelled=lambda: not active())
+                next_recovery = time.monotonic() + 1.0
+                if not active():
+                    break
+                if recovered and recovered not in tried:
+                    chosen = recovered
+            for ip in (() if chosen else self.route_health.rank(network, host, port, candidates)):
                 selected = fixed or self.strategy_engine.select_strategy(
                     host, ip=ip, is_discord=is_discord_host(host),
                     is_youtube=is_google_or_youtube_host(host))

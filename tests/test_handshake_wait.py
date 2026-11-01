@@ -68,6 +68,20 @@ class TestHandshakeWait(unittest.TestCase):
         self.assertIsNone(self.continuation()[0])
         self.proxy._try_direct_connect.assert_not_called()
 
+    def test_continuation_rechecks_recovery_before_exhausting_dns_candidates(self):
+        server, upstream = socket.socketpair()
+        self.addCleanup(server.close)
+        self.addCleanup(upstream.close)
+        self.proxy._discover_tls_route.return_value = ('8.6.112.0', 'tls_record_frag')
+        self.proxy._try_direct_connect = Mock(return_value=upstream)
+        self.proxy._safe_execute_strategy = Mock(return_value=True)
+        server.sendall(b'\x16\x03\x03\x00\x02ok')
+        result = self.continuation()
+        self.assertIs(result[0], upstream)
+        self.assertEqual(result[1], 'tls_record_frag')
+        self.assertEqual(self.proxy._try_direct_connect.call_args.args[:2], ('8.6.112.0', 443))
+        self.proxy._discover_tls_route.assert_called_once()
+
     def test_wait_is_cancelled_when_browser_closes(self):
         server, upstream = socket.socketpair()
         self.addCleanup(server.close)

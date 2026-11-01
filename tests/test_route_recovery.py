@@ -153,7 +153,7 @@ class TestRecoveryIntegration(unittest.TestCase):
                          ('wifi', 'finland14042.discord.media', 443))
 
     def test_network_change_during_probe_discards_result(self):
-        def switch(*args):
+        def switch(*args, **kwargs):
             self.proxy.strategy_engine._current_network = 'phone'
             return '8.6.112.0', 'direct'
         self.proxy.route_recovery.find.side_effect = switch

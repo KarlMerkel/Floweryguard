@@ -1,6 +1,6 @@
 """Ограниченные TLS-пробы резервных маршрутов без повторения запросов клиента."""
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import ipaddress
 import logging
 import socket
@@ -97,13 +97,41 @@ class RecoveryRoutes:
                 state['route'] = None
                 state['expires'] = 0
 
-    def find(self, network, host, port, pairs, timeout):
+    def find(self, network, host, port, pairs, timeout, cancelled=None):
+        deadline = time.monotonic() + timeout
+
+        def stopped():
+            return (self._closed or time.monotonic() >= deadline
+                    or (cancelled is not None and cancelled()))
+
+        if stopped() or not pairs:
+            return None
         cached = self.get(network, host, port)
         if cached:
             return cached if cached in pairs else None
-        if timeout <= 0 or not pairs or not self._gate.acquire(False):
-            return None
+        # Ожидание входит в тот же бюджет, новых сетевых задач в очереди нет.
+        while not self._gate.acquire(timeout=min(.05, max(0, deadline - time.monotonic()))):
+            if stopped():
+                return None
+            cached = self.get(network, host, port)
+            if cached and cached in pairs:
+                return cached
         try:
+            if stopped():
+                return None
+            cached = self.get(network, host, port)
+            if cached and cached in pairs:
+                return cached
+            # Победитель предыдущего поиска мог закончиться раньше второй пробы.
+            while True:
+                with self._lock:
+                    pending = [future for future in self._active if not future.done()]
+                if stopped():
+                    return None
+                if not pending:
+                    break
+                wait(pending, timeout=min(.05, max(0, deadline - time.monotonic())),
+                     return_when=FIRST_COMPLETED)
             key = self._key(network, host, port)
             with self._lock:
                 if self._closed or any(not future.done() for future in self._active):
@@ -119,24 +147,26 @@ class RecoveryRoutes:
                 pairs = list(dict.fromkeys(pairs))
                 chosen = [pairs[(state['cursor'] + i) % len(pairs)] for i in range(min(2, len(pairs)))]
                 state['cursor'] += len(chosen)
-                jobs = {self._pool.submit(self._probe, host, port, ip, strategy, timeout): (ip, strategy)
+                remaining = max(0, deadline - time.monotonic())
+                jobs = {self._pool.submit(self._probe, host, port, ip, strategy, remaining): (ip, strategy)
                         for ip, strategy in chosen}
                 self._active = list(jobs)
-            try:
-                for future in as_completed(jobs, timeout=timeout):
+            pending = set(jobs)
+            while pending and not stopped():
+                done, pending = wait(pending, timeout=min(.05, max(0, deadline - time.monotonic())),
+                                     return_when=FIRST_COMPLETED)
+                for future in done:
                     try:
                         valid = future.result()
                     except Exception:
                         valid = False
                     if valid:
                         with self._lock:
-                            if self._closed:
+                            if stopped():
                                 return None
                             state['route'] = jobs[future]
                             state['expires'] = self._clock() + 60
                         return jobs[future]
-            except TimeoutError:
-                return None
             return None
         finally:
             self._gate.release()
