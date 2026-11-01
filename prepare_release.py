@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import zipfile
 
-VERSION = '1.3.1'
+VERSION = '1.3.2'
 USER_FILES = {'strategy_scores.json', 'strategy_overrides.json', 'dns_snapshot.json',
               'mtu_snapshot.json', '.env'}
 

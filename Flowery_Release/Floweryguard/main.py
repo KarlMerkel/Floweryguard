@@ -514,7 +514,7 @@ FLOWEY_ART = [
 
 FLOWERY_BANNER = (
     "\033[1;95m  ╔══════════════════════════════════════════════════════════════════════════════╗\033[0m\n"
-    "\033[1;95m  ║   \033[1;93m✿ FLOWERY (GLUE) v1.3.1\033[1;95m — Высокоэффективный обход DPI для Windows         ║\033[0m\n"
+    "\033[1;95m  ║   \033[1;93m✿ FLOWERY (GLUE) v1.3.2\033[1;95m — Высокоэффективный обход DPI для Windows         ║\033[0m\n"
     "\033[1;95m  ║   \033[90mYouTube 4K • Discord Voice & Экран • Сетевые онлайн-игры (Steam, P2P)\033[1;95m     ║\033[0m\n"
     "\033[1;95m  ╚══════════════════════════════════════════════════════════════════════════════╝\033[0m\n"
 )
@@ -1179,7 +1179,7 @@ class FloweryApp:
         sep = "[90m" + "-" * 50 + "[0m"
 
         right_lines = [
-            "[1;97mМЕНЕДЖЕР СЛУЖБ FLOWERY v1.3.1 (GLUE)[0m",
+            "[1;97mМЕНЕДЖЕР СЛУЖБ FLOWERY v1.3.2 (GLUE)[0m",
             f"   {status_line}",
             f"   [90mПрофиль:[0m [96m{self.active_profile_name}[0m",
         ]
@@ -1414,7 +1414,7 @@ class FloweryApp:
         print("\033[95m" + flower.strip("\n") + "\033[0m")
         print("\033[96m" + GLUE_ASCII.strip("\n") + "\033[0m")
         indent = max(0, (min(cols, 80) - 47) // 2)
-        print("\033[1;97m" + " " * indent + "FLOWERY (GLUE) v1.3.1 — ОБХОД DPI ДЛЯ ТЕТЕРИНГА\033[0m")
+        print("\033[1;97m" + " " * indent + "FLOWERY (GLUE) v1.3.2 — ОБХОД DPI ДЛЯ ТЕТЕРИНГА\033[0m")
         print("\033[90m" + " " * indent + "YouTube 4K • Discord Voice & Экран • Сетевые онлайн-игры\033[0m\n")
 
     def run_status(self) -> None:

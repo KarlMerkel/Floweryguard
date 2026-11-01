@@ -1,6 +1,6 @@
-# Flowery (Glue) 1.3.1 — Windows x64
+# Flowery (Glue) 1.3.2 — Windows x64
 
-Python для запуска этого комплекта не нужен. Описание выпуска: https://github.com/KarlMerkel/Floweryguard/releases/tag/v1.3.1
+Python для запуска этого комплекта не нужен. Описание выпуска: https://github.com/KarlMerkel/Floweryguard/releases/tag/v1.3.2
 
 1. Распакуйте ZIP в отдельную доступную для записи папку.
 2. Завершите предыдущий Flowery через пункт `0` или `Ctrl+C`.

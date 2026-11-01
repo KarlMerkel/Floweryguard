@@ -176,7 +176,7 @@ def _get_app_version() -> str:
             from Floweryguard import __version__
             return __version__
         except Exception:
-            return "1.3.1"
+            return "1.3.2"
 
 
 # Единый путь к файлу текущей запущенной сессии: Flowery_v<версия>_<время_запуска>.log

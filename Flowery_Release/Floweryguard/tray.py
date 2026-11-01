@@ -18,7 +18,7 @@ try:
     except ImportError:
         from flowguard import __version__
 except Exception:
-    __version__ = "1.3.1"
+    __version__ = "1.3.2"
 
 logger = logging.getLogger("Flowery.Tray")
 
